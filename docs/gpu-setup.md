@@ -53,6 +53,22 @@ Run artifacts stay in the Linux clone under `runs/`. Copy anything worth
 keeping into the journal, or pull it back to the Windows side via
 `\\wsl$\Ubuntu-24.04\home\victo\world_models\runs`.
 
+## Backing up runs
+
+Run artifacts live only in the Linux clone (they're gitignored), so
+anything worth keeping gets pushed to the private HF dataset repo
+`RetamalVictor/world-models-runs`, mirroring the local layout. After a
+run that matters, from `~/world_models`:
+
+```
+uvx --from huggingface_hub hf upload RetamalVictor/world-models-runs runs runs \
+    --type dataset --commit-message "<what these runs are>"
+```
+
+Uploads are incremental (unchanged files are skipped), so re-running it
+after each session is cheap. The canonical `data/ball.npz` lives there
+too, under `data/`.
+
 ## Notes
 
 - Only commits travel between the two clones (via git), never loose
