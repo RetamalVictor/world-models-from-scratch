@@ -102,6 +102,19 @@ same for every future model: encode the 50 test episodes, fit on episodes
   dynamics models get compared against.
 - Journal entry with the numbers and images.
 
+## Outcome (2026-08-09)
+
+beta = 1 from a cold start collapses the posterior (KL = 0, mean-image
+decoder). The fix that keeps the beta = 1 target is the warmup knob:
+ramp over 5k steps, after which KL settles at ~5.4 nats with no
+re-collapse. Position probe lands at 0.75 (not the > 0.9 hoped for —
+the code is only partly linear; see journal 0004 for why that and the
+collapsed run's misleading probe score are lessons, not failures), and
+velocity R^2 is 0.00, which is the baseline this step existed to
+produce. Canonical run:
+
+    uv run train-vae --run-name warmup5k --beta 1.0 --beta-warmup-steps 5000
+
 ## Tests
 
 - Encoder/decoder/VAE output shapes and finite losses on random input.
