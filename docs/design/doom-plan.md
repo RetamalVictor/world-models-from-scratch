@@ -38,6 +38,18 @@ one array hop.
 - Reward is survival time; the reward head can be deferred until control
   (Step 4 machinery) is ported over.
 
+## Reproducibility when the data is on-policy
+
+The ball dataset is a fixed file, byte-identical from a seed. Doom data
+can't be: the replay buffer fills from a stateful C++ engine while the
+policy is changing, so "same bytes" stops being a meaningful target.
+The target becomes "same generating process, verified statistically":
+seed everything that can be seeded, log the collection config, and write
+a dataset report per collection round (episode length distribution,
+action histogram, pixel stats) so two supposedly identical runs can be
+compared. The stats report `make-data` writes for the ball is the same
+idea in embryo.
+
 ## Order of operations
 
 1. Optional middle rung if the jump feels big: gymnax MinAtar Breakout,

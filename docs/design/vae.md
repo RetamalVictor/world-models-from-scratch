@@ -73,9 +73,11 @@ entry.
 - Full-jit train step, seeded end to end: one PRNG key in the config
   determines init, batch order, and sampling.
 - Config as a frozen dataclass, dumped to `runs/vae/<run-name>/config.json`.
-- Metrics (recon, kl, total, val recon every 500 steps) appended to
-  `metrics.jsonl` in the same dir. Plain files, no experiment tracker; a
-  tutorial reader should be able to cat the log.
+- Tracking through a small `tracking.py` module: the run directory
+  (config.json, metrics.jsonl, pngs) is the source of truth and needs no
+  tools to read; wandb is an optional mirror, enabled with
+  `--wandb-project` after `uv sync --extra wandb`. Only tracking.py knows
+  wandb exists, so swapping trackers later is a one-file change.
 - Checkpoint via `flax.serialization` to a single msgpack file. Orbax is
   the grown-up answer but is overkill at this scale.
 - End-of-run artifacts, saved automatically: a held-out reconstruction
@@ -110,13 +112,17 @@ same for every future model: encode the 50 test episodes, fit on episodes
 - Probe: R^2 ~ 1 on synthetic data with a known linear map, ~0 on pure
   noise targets.
 
-## Open questions for review
+## Decisions (reviewed 2026-08-08)
 
-1. Cached dataset vs on-the-fly generation — argued above for cached, but
-   it is a real fork in the road.
-2. Latent 16 vs 8. Sixteen is my default; 8 would make the "capacity is
-   not the story" argument even stronger if reconstructions survive.
-3. beta = 1 fixed vs a short warmup. I'd start fixed and only add the
-   warmup on evidence of collapse.
-4. Plain jsonl logging vs wandb from day one. I'd keep the tutorial
-   dependency-light and revisit at Step 3 when runs get longer.
+1. Cached dataset for the ball. Doom will be different: on-policy data
+   from a stateful engine can't be byte-identical, so reproducibility
+   there shifts to statistical verification — see the reproducibility
+   note in [doom-plan.md](doom-plan.md). `make-data` already writes a
+   stats report next to the npz for exactly that reason.
+2. Latent stays 16.
+3. beta = 1, fixed. The config carries a `beta_warmup_steps` knob
+   (default 0, meaning constant) because Doom-scale models will need KL
+   warmup; the structure exists now, the ball doesn't use it.
+4. Tracking is local-first with wandb as the optional mirror (over
+   mlflow: better media logging for recon grids and imagined rollouts,
+   standard in the RL/world-models community, free hosted tier).
