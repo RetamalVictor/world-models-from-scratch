@@ -56,9 +56,11 @@ Ubuntu side for runs. Setup and per-session flow are in
 
 ```
 src/world_models/    the package (envs now, models as the steps land)
+scripts/             analysis and figure scripts
 tests/               pytest suite
 docs/design/         design notes, one file per component
 docs/journal/        dev log, one entry per work session
+docs/posts/          tutorial drafts, written from the journal
 ```
 
 The journal is the raw material for the tutorial: what was built, what broke,
