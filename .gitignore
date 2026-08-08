@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Tooling caches
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Experiment outputs (checkpoints, logs, local renders)
+checkpoints/
+runs/
+/*.gif
