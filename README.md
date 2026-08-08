@@ -47,11 +47,10 @@ Run the tests:
 uv run pytest
 ```
 
-The default install is CPU JAX, which is plenty for the ball-sized models.
-For heavier runs there's an RTX 5070 Ti available, but JAX has no native
-Windows CUDA support, so GPU training means running the repo under WSL2
-with `jax[cuda12]` instead of `jax[cpu]`. That switch can wait until
-something is actually slow.
+Training runs on the GPU (an RTX 5070 Ti) through WSL2, since JAX has no
+native Windows CUDA support; the Windows side is for development and the
+Ubuntu side for runs. Setup and per-session flow are in
+[docs/gpu-setup.md](docs/gpu-setup.md).
 
 ## Layout
 
