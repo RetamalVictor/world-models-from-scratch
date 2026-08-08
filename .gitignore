@@ -18,3 +18,7 @@ data/
 checkpoints/
 runs/
 /*.gif
+
+# Markdown is reviewed and committed manually; only the README is tracked
+*.md
+!README.md
