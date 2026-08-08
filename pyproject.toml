@@ -11,10 +11,19 @@ dependencies = [
     "distrax",
     "gymnax",
     "matplotlib",
+    "numpy",
 ]
+
+[project.optional-dependencies]
+wandb = ["wandb"]
+# GPU training runs under WSL2 (JAX has no native Windows CUDA support);
+# see docs/gpu-setup.md. The marker keeps Windows installs CPU-only.
+cuda = ["jax[cuda12]; sys_platform == 'linux'"]
 
 [project.scripts]
 ball-demo = "world_models.demo:main"
+make-data = "world_models.data:main"
+train-vae = "world_models.train_vae:main"
 
 [dependency-groups]
 dev = [
