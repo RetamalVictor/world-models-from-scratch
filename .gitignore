@@ -13,7 +13,8 @@ wheels/
 .pytest_cache/
 .ipynb_checkpoints/
 
-# Experiment outputs (checkpoints, logs, local renders)
+# Data and experiment outputs (regenerable from seeds; see docs/design/vae.md)
+data/
 checkpoints/
 runs/
 /*.gif
