@@ -36,7 +36,7 @@ from world_models import rollout as rollout_lib
 from world_models.models.gru_dynamics import GRUDynamics, sequence_nll
 from world_models.models.vae import VAE, load_vae
 from world_models.plotstyle import BLUE, style
-from world_models.tracking import Tracker
+from world_models.tracking import Tracker, metrics_figure
 
 
 @dataclass(frozen=True)
@@ -296,6 +296,7 @@ def train(config: Config) -> dict:
         "at": {str(k): float(mse[k - 1]) for k in (1, 5, 15, 30)},
     }
     tracker.log_json("drift", drift)
+    tracker.log_figure("loss_curves", metrics_figure(run_dir))
     tracker.log_figure("drift_curve", drift_figure(mse, config.warmup))
     tracker.log_figure("filmstrip", filmstrip_figure(pred_frames, true_frames,
                                                      episode=0))

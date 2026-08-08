@@ -29,6 +29,38 @@ def git_state() -> str:
         return "unknown"
 
 
+def metrics_figure(run_dir: str | Path):
+    """Training curves from a run's metrics.jsonl: one panel per metric,
+    with its val_* series overlaid when present."""
+    import matplotlib.pyplot as plt
+
+    from world_models.plotstyle import BLUE, ORANGE, style
+
+    rows = [
+        json.loads(line)
+        for line in (Path(run_dir) / "metrics.jsonl").read_text().splitlines()
+    ]
+    base_keys = list(dict.fromkeys(
+        k for r in rows for k in r
+        if k != "step" and not k.startswith("val_")
+    ))
+    fig, axes = plt.subplots(1, len(base_keys),
+                             figsize=(4.5 * len(base_keys), 3.2))
+    axes = axes if len(base_keys) > 1 else [axes]
+    for ax, key in zip(axes, base_keys):
+        train = [(r["step"], r[key]) for r in rows if key in r]
+        ax.plot(*zip(*train), color=BLUE, lw=1.2, label=key)
+        val = [(r["step"], r["val_" + key]) for r in rows if "val_" + key in r]
+        if val:
+            ax.plot(*zip(*val), color=ORANGE, lw=1.5, label=f"val {key}")
+            ax.legend(frameon=False, fontsize=8, labelcolor="#52514e")
+        ax.set_xlabel("step")
+        ax.set_title(key, fontsize=10)
+        style(ax)
+    fig.tight_layout()
+    return fig
+
+
 class Tracker:
     def __init__(
         self,
