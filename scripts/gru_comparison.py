@@ -74,7 +74,7 @@ def main():
     for xi, v in zip(x, vels):
         ax2.annotate(f"{v:.2f}", (xi, v), ha="center", va="bottom",
                      fontsize=8, color=INK2)
-    ax2.annotate("frozen VAE latent probes at 0.00", (0.5, 0.06),
+    ax2.annotate("frozen VAE latent probes at 0.00", (0.5, 0.93),
                  xycoords="axes fraction", ha="center",
                  fontsize=8, color=MUTED)
     ax2.set_xticks(x, [n.replace("-", "\n") for n in names], fontsize=8)
