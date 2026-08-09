@@ -13,6 +13,17 @@ Every random draw is keyed by a persistent counter (episodes collected,
 updates done), never by wall-clock position in the process, so a
 killed-and-resumed run continues exactly the run it interrupted.
 tests/test_online.py holds this to byte-identical checkpoints.
+
+After the loop, the co-trained actor is chasing a world model that kept
+moving underneath it and plateaus at 0.801 mean reward, well short of
+the offline bar. A fresh actor-critic trained offline-style against
+that same world model, now frozen, reaches 0.911 (beats the 0.879
+offline number) — the lag is in the actor, not the model. The
+`--final-ac-steps` flag (0 to disable) re-fits that fresh actor-critic
+after the loop; it is deliberately not checkpointed, since it is cheap
+to redo from the frozen model and buffer alone. Because it runs after
+the loop, resuming a finished run with `--rounds` set to its completed
+round count skips the loop and goes straight to the refit.
 """
 
 from __future__ import annotations
@@ -77,6 +88,7 @@ class Config:
     episodes_per_round: int = 1
     wm_updates: int = 50             # per round
     ac_updates: int = 50             # per round
+    final_ac_steps: int = 5000       # fresh actor-critic refit, 0 disables
     # bookkeeping
     log_every: int = 1               # rounds
     eval_every: int = 25             # rounds
@@ -92,7 +104,7 @@ class Config:
 
 
 # Disjoint fold_in lanes so no counter can collide with another's keys.
-K_EPISODE, K_WM, K_AC, K_EVAL = 1, 2, 3, 4
+K_EPISODE, K_WM, K_AC, K_EVAL, K_REFIT = 1, 2, 3, 4, 5
 
 
 def lane_key(root: jax.Array, lane: int, counter: int) -> jax.Array:
@@ -322,10 +334,12 @@ def train(config: Config) -> dict:
         counters["episode"] += 1
         return float(ep["reward"][0, 1:].mean())
 
-    def real_eval(n_episodes: int, key_counter: int, policy: str) -> np.ndarray:
+    def real_eval(n_episodes: int, key_counter: int, policy: str,
+                 actor_params=None) -> np.ndarray:
         keys = jax.random.split(
             lane_key(root_key, K_EVAL, key_counter), n_episodes)
-        ep = runners[policy](keys, wm_state.params, actor_state.params)
+        params = actor_state.params if actor_params is None else actor_params
+        ep = runners[policy](keys, wm_state.params, params)
         return np.asarray(ep["reward"][:, 1:].mean(axis=1))
 
     def save_checkpoint(metric: float | None):
@@ -388,6 +402,46 @@ def train(config: Config) -> dict:
                             config.rounds + 1, policy)
         final[policy] = {"mean_reward": float(returns.mean()),
                          "std": float(returns.std())}
+
+    # Fresh actor-critic, re-fit offline-style against the frozen final
+    # WM: the co-trained actor above lags a WM that kept moving under it.
+    # Own K_REFIT lane and counter, untouched by the loop's counters, so
+    # this is a pure function of (config, wm_state.params, buffer) — not
+    # checkpointed, cheap enough to redo on demand.
+    refit_actor_state = refit_critic_state = None
+    if config.final_ac_steps > 0:
+        k_actor_r, k_critic_r = jax.random.split(
+            lane_key(root_key, K_REFIT, 0))
+        refit_actor_state = train_state.TrainState.create(
+            apply_fn=actor.apply,
+            params=actor.init(k_actor_r, jnp.zeros((1, s_dim))),
+            tx=optax.chain(optax.clip_by_global_norm(config.ac_grad_clip),
+                           optax.adam(config.ac_lr)),
+        )
+        refit_critic_state = train_state.TrainState.create(
+            apply_fn=critic.apply,
+            params=critic.init(k_critic_r, jnp.zeros((1, s_dim))),
+            tx=optax.chain(optax.clip_by_global_norm(config.ac_grad_clip),
+                           optax.adam(config.ac_lr)),
+        )
+        for u in range(1, config.final_ac_steps + 1):
+            batch_rng = np.random.default_rng([config.seed, K_REFIT, u])
+            obs_seq, act_seq, _ = buffer.sample_sequences(
+                batch_rng, config.seq_batch, config.seq_len)
+            (refit_actor_state, refit_critic_state, a_loss, c_loss,
+             imag_reward, imag_return) = ac_step(
+                wm_state.params, refit_actor_state, refit_critic_state,
+                obs_seq, act_seq, lane_key(root_key, K_REFIT, u))
+            if u % 500 == 0 or u == config.final_ac_steps:
+                tracker.log(config.rounds + u, refit_actor_loss=a_loss,
+                           refit_critic_loss=c_loss,
+                           refit_imag_reward=imag_reward)
+
+        returns = real_eval(config.final_eval_episodes, config.rounds + 1,
+                            "actor", actor_params=refit_actor_state.params)
+        final["actor_refit"] = {"mean_reward": float(returns.mean()),
+                                "std": float(returns.std())}
+
     tracker.log_json("eval", final)
 
     if config.artifacts:
@@ -399,17 +453,27 @@ def train(config: Config) -> dict:
             serialization.to_bytes(actor_state.params))
         (run_dir / "critic.msgpack").write_bytes(
             serialization.to_bytes(critic_state.params))
+        if config.final_ac_steps > 0:
+            (run_dir / "actor_refit.msgpack").write_bytes(
+                serialization.to_bytes(refit_actor_state.params))
+            (run_dir / "critic_refit.msgpack").write_bytes(
+                serialization.to_bytes(refit_critic_state.params))
 
+        # Gifs come from the refit actor once one exists — it is the
+        # better policy — else the co-trained actor, as before.
+        gif_actor_params = (refit_actor_state.params
+                            if config.final_ac_steps > 0
+                            else actor_state.params)
         ep = jax.device_get(runners["actor"](
             lane_key(root_key, K_EVAL, config.rounds + 2)[None],
-            wm_state.params, actor_state.params))
+            wm_state.params, gif_actor_params))
         frames, acts = ep["obs"][0], ep["action"][0]
         rollout_lib.single_gif(frames[:150], run_dir / "real_rollout.gif")
         fobs = jnp.asarray(frames[:5])[:, None]
         fact = jnp.asarray(acts[:5])[:, None]
         h_seq, z_seq = filter_episodes(model, wm_state.params, fobs, fact)
         imag = imagine_frames(model, wm_state.params, actor,
-                              actor_state.params, h_seq[-1], z_seq[-1], 30)
+                              gif_actor_params, h_seq[-1], z_seq[-1], 30)
         rollout_lib.side_by_side_gif(frames[5:35], np.asarray(imag)[:, 0],
                                      run_dir / "imagination.gif")
         tracker.log_figure("loss_curves", metrics_figure(run_dir))
@@ -428,6 +492,8 @@ def main():
     parser.add_argument("--rounds", type=int, default=defaults.rounds)
     parser.add_argument("--wm-updates", type=int, default=defaults.wm_updates)
     parser.add_argument("--ac-updates", type=int, default=defaults.ac_updates)
+    parser.add_argument("--final-ac-steps", type=int,
+                        default=defaults.final_ac_steps)
     parser.add_argument("--episodes-per-round", type=int,
                         default=defaults.episodes_per_round)
     parser.add_argument("--seed-episodes", type=int,
@@ -445,6 +511,7 @@ def main():
         rounds=args.rounds,
         wm_updates=args.wm_updates,
         ac_updates=args.ac_updates,
+        final_ac_steps=args.final_ac_steps,
         episodes_per_round=args.episodes_per_round,
         seed_episodes=args.seed_episodes,
         run_name=args.run_name,

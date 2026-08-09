@@ -1,4 +1,5 @@
 import dataclasses
+import json
 
 import jax
 import jax.numpy as jnp
@@ -17,7 +18,7 @@ def _tiny_config(tmp_path, run_name, rounds, resume=False):
         latent_dim=4, hidden=8,
         buffer_capacity=2000, seed_episodes=2,
         rounds=rounds, episodes_per_round=1,
-        wm_updates=1, ac_updates=1,
+        wm_updates=1, ac_updates=1, final_ac_steps=0,
         transitions=5, batch_size=2,
         horizon=3, seq_batch=1, seq_len=4,
         log_every=1, eval_every=1000, eval_episodes=1,
@@ -79,3 +80,21 @@ def test_fresh_run_refuses_existing_dir(tmp_path):
         train(config)
     with pytest.raises(SystemExit):
         train(dataclasses.replace(config, run_name="missing", resume=True))
+
+
+def test_final_actor_refit_evals_both_actors_and_is_deterministic(tmp_path):
+    # The refit is a pure function of (config, final WM, buffer): two
+    # independent runs of the same config must land on the same number.
+    config = dataclasses.replace(
+        _tiny_config(tmp_path, "refit-a", rounds=2), final_ac_steps=2)
+    final_a = train(config)
+    final_b = train(dataclasses.replace(config, run_name="refit-b"))
+
+    for final in (final_a, final_b):
+        assert isinstance(final["actor"]["mean_reward"], float)
+        assert isinstance(final["actor_refit"]["mean_reward"], float)
+
+    eval_a = json.loads((tmp_path / "refit-a" / "eval.json").read_text())
+    assert "actor" in eval_a and "actor_refit" in eval_a
+    assert (final_a["actor_refit"]["mean_reward"]
+            == final_b["actor_refit"]["mean_reward"])
