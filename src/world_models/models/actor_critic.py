@@ -40,21 +40,34 @@ class Critic(nn.Module):
         return nn.Dense(1)(x)[..., 0]
 
 
-def lambda_returns(rewards, values, gamma: float, lam: float):
+def lambda_returns(rewards, values, gamma: float, lam: float,
+                   continues=None):
     """TD(lambda) returns, computed backwards.
 
     rewards[i] is the reward received entering state s_{i+1}; values[i]
     is the critic's value of s_{i+1}. Both (H, B). Returns (H, B) where
     out[i] is the lambda-return of state s_i.
+
+    continues[i] (H, B) is the probability the episode survives into
+    s_{i+1}, so the per-step discount becomes gamma * continues[i] and
+    a predicted death truncates the return instead of bootstrapping
+    through it — without it, imagination happily values what happens
+    after you die. None means the episode always continues, which is
+    the ball and every caller written before the continue head.
     """
+    if continues is None:
+        discounts = jnp.full_like(rewards, gamma)
+    else:
+        discounts = gamma * continues
+
     def step(carry, xs):
         next_return = carry
-        r, v = xs
-        ret = r + gamma * ((1.0 - lam) * v + lam * next_return)
+        r, v, d = xs
+        ret = r + d * ((1.0 - lam) * v + lam * next_return)
         return ret, ret
 
     bootstrap = values[-1]
     _, returns = jax.lax.scan(
-        step, bootstrap, (rewards, values), reverse=True
+        step, bootstrap, (rewards, values, discounts), reverse=True
     )
     return returns

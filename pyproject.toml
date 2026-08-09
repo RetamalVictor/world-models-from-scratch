@@ -19,6 +19,8 @@ wandb = ["wandb"]
 # GPU training runs under WSL2 (JAX has no native Windows CUDA support);
 # see docs/gpu-setup.md. The marker keeps Windows installs CPU-only.
 cuda = ["jax[cuda12]; sys_platform == 'linux'"]
+# The engine. Ships the take_cover scenario and a free WAD; nothing to buy.
+doom = ["vizdoom"]
 
 [project.scripts]
 ball-demo = "world_models.demo:main"

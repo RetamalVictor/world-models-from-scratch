@@ -13,6 +13,9 @@ wheels/
 .pytest_cache/
 .ipynb_checkpoints/
 
+# The Doom engine writes its own settings file into the working directory
+_vizdoom.ini
+
 # Data and experiment outputs (regenerable from seeds; see docs/design/vae.md)
 data/
 checkpoints/

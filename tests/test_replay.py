@@ -81,3 +81,65 @@ def test_save_load_roundtrip(tmp_path):
     b = loaded.sample_sequences(np.random.default_rng(7), 32, 4)
     for x, y in zip(a, b):
         np.testing.assert_array_equal(np.asarray(x), np.asarray(y))
+
+
+def test_continue_targets_mark_only_deaths():
+    buffer = ReplayBuffer(capacity=100)
+    buffer.add_episode(*_episode(1, 6), terminated=True)
+    buffer.add_episode(*_episode(2, 6))          # timed out, did not die
+    rng = np.random.default_rng(0)
+    obs, act, rew, cont = buffer.sample_sequences_with_continues(rng, 64, 5)
+    assert cont.shape == (6, 64)
+    # 5 transitions out of 6 frames: every sequence is a whole episode
+    died = np.asarray(rew)[0] == 1.0
+    np.testing.assert_array_equal(np.asarray(cont)[:5], 1.0)
+    np.testing.assert_array_equal(np.asarray(cont)[5], (~died).astype(float))
+
+
+def test_continues_only_appear_at_the_true_episode_end():
+    buffer = ReplayBuffer(capacity=100)
+    buffer.add_episode(*_episode(1, 8), terminated=True)
+    rng = np.random.default_rng(0)
+    _, _, rew, cont = buffer.sample_sequences_with_continues(rng, 128, 3)
+    # starts 0..4 are valid; only start 4 reaches the terminal frame
+    np.testing.assert_array_equal(np.asarray(cont)[:3], 1.0)
+    assert set(np.asarray(cont)[3].tolist()) == {0.0, 1.0}
+
+
+def test_sampling_with_continues_matches_the_plain_sampler():
+    buffer = ReplayBuffer(capacity=200)
+    for value in (1, 2, 3):
+        buffer.add_episode(*_episode(value, 10), terminated=value == 2)
+    plain = buffer.sample_sequences(np.random.default_rng(3), 16, 4)
+    with_c = buffer.sample_sequences_with_continues(
+        np.random.default_rng(3), 16, 4)
+    for x, y in zip(plain, with_c):
+        np.testing.assert_array_equal(np.asarray(x), np.asarray(y))
+
+
+def test_terminated_survives_save_load(tmp_path):
+    buffer = ReplayBuffer(capacity=100)
+    buffer.add_episode(*_episode(1, 6), terminated=True)
+    buffer.add_episode(*_episode(2, 6))
+    path = tmp_path / "buffer.npz"
+    buffer.save(path)
+    loaded = ReplayBuffer.load(path)
+    a = buffer.sample_sequences_with_continues(np.random.default_rng(1), 32, 5)
+    b = loaded.sample_sequences_with_continues(np.random.default_rng(1), 32, 5)
+    for x, y in zip(a, b):
+        np.testing.assert_array_equal(np.asarray(x), np.asarray(y))
+
+
+def test_loads_buffers_written_before_the_terminated_flag(tmp_path):
+    """Phase A files have no terminated array; the ball only times out."""
+    obs, action, reward = _episode(1, 6)
+    path = tmp_path / "old_buffer.npz"
+    np.savez_compressed(
+        path, obs=obs, action=action, reward=reward,
+        lengths=np.array([6]), capacity=100, frames_added=6,
+    )
+    loaded = ReplayBuffer.load(path)
+    assert len(loaded) == 6 and loaded.n_episodes == 1
+    _, _, _, cont = loaded.sample_sequences_with_continues(
+        np.random.default_rng(0), 8, 5)
+    np.testing.assert_array_equal(np.asarray(cont), 1.0)

@@ -1,5 +1,6 @@
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from world_models.models.actor_critic import Actor, Critic, lambda_returns
 
@@ -41,3 +42,44 @@ def test_critic_shape():
     params = critic.init(jax.random.PRNGKey(0), s)
     v = critic.apply(params, s)
     assert v.shape == (5,)
+
+
+def test_all_ones_continues_reduce_to_plain_lambda_returns():
+    rewards = jnp.array([[1.0], [2.0], [3.0]])
+    values = jnp.array([[10.0], [20.0], [30.0]])
+    plain = lambda_returns(rewards, values, gamma=0.9, lam=0.7)
+    discounted = lambda_returns(rewards, values, gamma=0.9, lam=0.7,
+                                continues=jnp.ones_like(rewards))
+    np.testing.assert_array_equal(np.asarray(plain), np.asarray(discounted))
+
+
+def test_discounted_lambda_returns_closed_form():
+    # H=3, r=[1,2,3], v=[10,20,30], gamma=0.5, lam=0.5, c=[1,0,1].
+    # The discount is gamma*c, so the death at i=1 truncates:
+    #   R[2] = 3 + 0.5*(0.5*30 + 0.5*30)    = 18
+    #   R[1] = 2 + 0.0*(...)                = 2
+    #   R[0] = 1 + 0.5*(0.5*10 + 0.5*2)     = 4
+    # With c all ones R[0] would be 6.375, so the flag is load-bearing.
+    rewards = jnp.array([[1.0], [2.0], [3.0]])
+    values = jnp.array([[10.0], [20.0], [30.0]])
+    continues = jnp.array([[1.0], [0.0], [1.0]])
+    returns = lambda_returns(rewards, values, gamma=0.5, lam=0.5,
+                             continues=continues)
+    assert abs(float(returns[2, 0]) - 18.0) < 1e-5
+    assert abs(float(returns[1, 0]) - 2.0) < 1e-5
+    assert abs(float(returns[0, 0]) - 4.0) < 1e-5
+    plain = lambda_returns(rewards, values, gamma=0.5, lam=0.5)
+    assert abs(float(plain[0, 0]) - 6.375) < 1e-5
+
+
+def test_soft_continues_interpolate():
+    # A half-confident continue halves the discount at that step:
+    #   R[1] = 2 + 0.5*0.5*20 = 7
+    #   R[0] = 1 + 0.5*1.0*(0.5*10 + 0.5*7) = 5.25
+    rewards = jnp.array([[1.0], [2.0]])
+    values = jnp.array([[10.0], [20.0]])
+    continues = jnp.array([[1.0], [0.5]])
+    returns = lambda_returns(rewards, values, gamma=0.5, lam=0.5,
+                             continues=continues)
+    assert abs(float(returns[1, 0]) - 7.0) < 1e-5
+    assert abs(float(returns[0, 0]) - 5.25) < 1e-5

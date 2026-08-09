@@ -8,6 +8,10 @@ about: a Doom episode and a ball episode differ in length, not width.
 
 The buffer round-trips through save()/load() so a resumed run continues
 with exactly the data the interrupted run had.
+
+Episodes carry a terminated flag: True means the agent died, False means
+the collector simply stopped (a time limit). Only the first kind ends
+the world, and only the first kind produces a zero continue target.
 """
 
 from __future__ import annotations
@@ -17,6 +21,20 @@ from pathlib import Path
 
 import jax.numpy as jnp
 import numpy as np
+
+
+def _continues(episode: dict) -> np.ndarray:
+    """1.0 while the episode continues past frame t.
+
+    Only the last frame of a death gets a 0.0. A timeout episode stays
+    all ones: a time limit is the collector stopping, not the world
+    ending, and training the continue head on it would teach the model
+    to expect death at a fixed clock.
+    """
+    c = np.ones(episode["obs"].shape[0], np.float32)
+    if episode["terminated"]:
+        c[-1] = 0.0
+    return c
 
 
 class ReplayBuffer:
@@ -34,8 +52,11 @@ class ReplayBuffer:
         return len(self._episodes)
 
     def add_episode(self, obs: np.ndarray, action: np.ndarray,
-                    reward: np.ndarray):
-        """obs uint8 (T+1, H, W, C); action (T+1, A); reward (T+1,)."""
+                    reward: np.ndarray, terminated: bool = False):
+        """obs uint8 (T+1, H, W, C); action (T+1, A); reward (T+1,).
+
+        terminated: the episode ended in death rather than a time limit.
+        """
         obs = np.asarray(obs)
         if obs.dtype != np.uint8:
             raise ValueError(
@@ -45,6 +66,7 @@ class ReplayBuffer:
             "obs": obs,
             "action": np.asarray(action, np.float32),
             "reward": np.asarray(reward, np.float32),
+            "terminated": bool(terminated),
         })
         self.frames += obs.shape[0]
         self.frames_added += obs.shape[0]
@@ -52,14 +74,9 @@ class ReplayBuffer:
             gone = self._episodes.popleft()
             self.frames -= gone["obs"].shape[0]
 
-    def sample_sequences(self, rng: np.random.Generator, batch_size: int,
-                         transitions: int):
-        """Uniform over every valid (episode, start) pair.
-
-        Returns time-major float batches matching sample_pixel_batch:
-        obs (T+1, B, H, W, C) in [0, 1], actions (T+1, B, A),
-        rewards (T+1, B).
-        """
+    def _draw(self, rng: np.random.Generator, batch_size: int,
+              transitions: int):
+        """Uniform over every valid (episode, start) pair."""
         episodes = list(self._episodes)
         counts = np.array(
             [ep["obs"].shape[0] - transitions for ep in episodes]
@@ -73,7 +90,9 @@ class ReplayBuffer:
         u = rng.integers(0, total, batch_size)
         ep_idx = np.searchsorted(cum, u, side="right")
         t0 = u - (cum[ep_idx] - counts[ep_idx])
+        return episodes, ep_idx, t0
 
+    def _gather(self, episodes, ep_idx, t0, transitions):
         obs = np.stack([episodes[i]["obs"][t:t + transitions + 1]
                         for i, t in zip(ep_idx, t0)])
         act = np.stack([episodes[i]["action"][t:t + transitions + 1]
@@ -86,6 +105,31 @@ class ReplayBuffer:
             jnp.asarray(rew.transpose(1, 0)),
         )
 
+    def sample_sequences(self, rng: np.random.Generator, batch_size: int,
+                         transitions: int):
+        """Uniform over every valid (episode, start) pair.
+
+        Returns time-major float batches matching sample_pixel_batch:
+        obs (T+1, B, H, W, C) in [0, 1], actions (T+1, B, A),
+        rewards (T+1, B).
+        """
+        draw = self._draw(rng, batch_size, transitions)
+        return self._gather(*draw, transitions)
+
+    def sample_sequences_with_continues(self, rng: np.random.Generator,
+                                        batch_size: int, transitions: int):
+        """sample_sequences plus continue targets (T+1, B).
+
+        Same draw from the same rng, so the extra array is the only
+        difference from sample_sequences on an identically seeded call.
+        """
+        episodes, ep_idx, t0 = self._draw(rng, batch_size, transitions)
+        con = np.stack([_continues(episodes[i])[t:t + transitions + 1]
+                        for i, t in zip(ep_idx, t0)])
+        return self._gather(episodes, ep_idx, t0, transitions) + (
+            jnp.asarray(con.transpose(1, 0)),
+        )
+
     def save(self, path: str | Path):
         path = Path(path)
         episodes = list(self._episodes)
@@ -96,6 +140,7 @@ class ReplayBuffer:
             action=np.concatenate([ep["action"] for ep in episodes]),
             reward=np.concatenate([ep["reward"] for ep in episodes]),
             lengths=np.array([ep["obs"].shape[0] for ep in episodes]),
+            terminated=np.array([ep["terminated"] for ep in episodes], bool),
             capacity=self.capacity,
             frames_added=self.frames_added,
         )
@@ -107,11 +152,16 @@ class ReplayBuffer:
             buffer = cls(int(f["capacity"]))
             lengths = f["lengths"]
             obs, act, rew = f["obs"], f["action"], f["reward"]
-            for start, length in zip(
-                np.concatenate([[0], np.cumsum(lengths)[:-1]]), lengths
+            # Files written before the flag existed came from the ball,
+            # which only ever times out.
+            terminated = (f["terminated"] if "terminated" in f
+                          else np.zeros(len(lengths), bool))
+            for start, length, term in zip(
+                np.concatenate([[0], np.cumsum(lengths)[:-1]]), lengths,
+                terminated,
             ):
                 buffer.add_episode(obs[start:start + length],
                                    act[start:start + length],
-                                   rew[start:start + length])
+                                   rew[start:start + length], bool(term))
             buffer.frames_added = int(f["frames_added"])
         return buffer
