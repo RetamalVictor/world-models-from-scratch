@@ -62,6 +62,24 @@ class VAE(nn.Module):
         return self.decoder(z)
 
 
+def load_vae(run_dir):
+    """Load a trained VAE from a run directory -> (model, params)."""
+    import json
+    from pathlib import Path
+
+    from flax import serialization
+
+    run_dir = Path(run_dir)
+    cfg = json.loads((run_dir / "config.json").read_text())
+    model = VAE(latent_dim=cfg["latent_dim"])
+    k1, k2 = jax.random.split(jax.random.PRNGKey(0))
+    template = model.init(k1, jnp.zeros((1, 32, 32, 1)), k2)
+    params = serialization.from_bytes(
+        template, (run_dir / "checkpoint.msgpack").read_bytes()
+    )
+    return model, params
+
+
 def elbo_terms(recon, x, mu, logvar):
     """(recon_error, kl), each averaged over the batch.
 
