@@ -65,21 +65,27 @@ def beta_at(config: Config, step) -> jnp.ndarray:
     return beta
 
 
-def sample_pixel_batch(rng, obs, actions, episodes, transitions, batch_size):
-    """Random pixel subsequences -> time-major (T+1, B, H, W, 1) and (T+1, B, A)."""
+def sample_pixel_batch(rng, obs, actions, rewards, episodes, transitions,
+                       batch_size):
+    """Random pixel subsequences, time-major: (T+1, B, H, W, C), (T+1, B, A),
+    (T+1, B). rewards may be None (plain dataset) -> zeros."""
     ep = rng.integers(episodes.start, episodes.stop, batch_size)
     t0 = rng.integers(0, obs.shape[1] - (transitions + 1), batch_size)
     t_idx = t0[:, None] + np.arange(transitions + 1)[None, :]
     o = obs[ep[:, None], t_idx]
     a = actions[ep[:, None], t_idx]
+    r = (rewards[ep[:, None], t_idx] if rewards is not None
+         else np.zeros(t_idx.shape, np.float32))
     return (jnp.asarray(o.transpose(1, 0, 2, 3, 4), jnp.float32) / 255.0,
-            jnp.asarray(a.transpose(1, 0, 2)))
+            jnp.asarray(a.transpose(1, 0, 2)),
+            jnp.asarray(r.transpose(1, 0)))
 
 
-def make_losses(model: RSSM, config: Config):
-    def sequence_loss(params, obs_seq, act_seq, key, beta):
-        """obs_seq: (T+1, B, H, W, 1) time-major. Recon on every frame,
-        KL on frames 1..T (frame 0 has no meaningful prior)."""
+def make_losses(model: RSSM, config: Config, has_reward: bool = False):
+    def sequence_loss(params, obs_seq, act_seq, rew_seq, key, beta):
+        """obs_seq: (T+1, B, H, W, C) time-major. Recon on every frame,
+        KL on frames 1..T (frame 0 has no meaningful prior), reward MSE
+        on every frame when the dataset has rewards."""
         t1, b = obs_seq.shape[0], obs_seq.shape[1]
         e = model.apply(params, obs_seq.reshape((-1,) + obs_seq.shape[2:]),
                         method=RSSM.encode).reshape(t1, b, -1)
@@ -90,27 +96,33 @@ def make_losses(model: RSSM, config: Config):
         z0 = mu_q0 + sig_q0 * noise[0]
         o_hat0 = model.apply(params, h0, z0, method=RSSM.decode)
         recon0 = ((o_hat0 - obs_seq[0]) ** 2).sum(axis=(1, 2, 3)).mean()
+        r_hat0 = model.apply(params, h0, z0, method=RSSM.reward)
+        rew0 = ((r_hat0 - rew_seq[0]) ** 2).mean()
 
         def step(carry, xs):
             h, z = carry
-            e_t, o_t, a_t, n_t = xs
+            e_t, o_t, a_t, r_t, n_t = xs
             h = model.apply(params, h, z, a_t, method=RSSM.core_step)
             mu_p, sig_p = model.apply(params, h, method=RSSM.prior_dist)
             mu_q, sig_q = model.apply(params, h, e_t, method=RSSM.post_dist)
             z = mu_q + sig_q * n_t
             o_hat = model.apply(params, h, z, method=RSSM.decode)
             recon = ((o_hat - o_t) ** 2).sum(axis=(1, 2, 3)).mean()
+            r_hat = model.apply(params, h, z, method=RSSM.reward)
+            rew = ((r_hat - r_t) ** 2).mean()
             klb = kl_balanced(mu_q, sig_q, mu_p, sig_p, config.alpha).mean()
             klr = kl_gauss(mu_q, sig_q, mu_p, sig_p).mean()
-            return (h, z), (recon, klb, klr)
+            return (h, z), (recon, rew, klb, klr)
 
-        _, (recons, klbs, klrs) = jax.lax.scan(
-            step, (h0, z0), (e[1:], obs_seq[1:], act_seq[1:], noise[1:])
+        _, (recons, rews, klbs, klrs) = jax.lax.scan(
+            step, (h0, z0),
+            (e[1:], obs_seq[1:], act_seq[1:], rew_seq[1:], noise[1:]),
         )
         recon = (recon0 + recons.sum()) / t1
+        rew = (rew0 + rews.sum()) / t1 if has_reward else jnp.float32(0.0)
         klb = klbs.mean()
         klr = klrs.mean()
-        return recon + beta * klb, (recon, klr)
+        return recon + rew + beta * klb, (recon, klr, rew)
 
     return sequence_loss
 
@@ -190,6 +202,22 @@ def drift_eval(model, params, dataset, test_split, config):
     return curves, np.asarray(frames_mean), np.asarray(true_frames)
 
 
+def probe_targets(dataset, test_split):
+    """Ground-truth probe targets; goal entries appear when present and
+    non-degenerate (a hover goal has zero velocity variance)."""
+    targets = {
+        "position": np.stack([dataset["x"][test_split], dataset["y"][test_split]], -1),
+        "velocity": np.stack([dataset["vx"][test_split], dataset["vy"][test_split]], -1),
+    }
+    if "gx" in dataset:
+        targets["goal_position"] = np.stack(
+            [dataset["gx"][test_split], dataset["gy"][test_split]], -1)
+        gv = np.stack([dataset["gvx"][test_split], dataset["gvy"][test_split]], -1)
+        if gv.std() > 1e-3:
+            targets["goal_velocity"] = gv
+    return targets
+
+
 def probe_states(model, params, dataset, test_split, warmup):
     """Probes on h alone (capacity-matched vs the GRU) and on [h, z]."""
     obs = jnp.asarray(
@@ -201,10 +229,7 @@ def probe_states(model, params, dataset, test_split, warmup):
     z = np.asarray(z_seq).transpose(1, 0, 2)
     hz = np.concatenate([h, z], axis=-1)
 
-    truth = {
-        "position": np.stack([dataset["x"][test_split], dataset["y"][test_split]], -1),
-        "velocity": np.stack([dataset["vx"][test_split], dataset["vy"][test_split]], -1),
-    }
+    truth = probe_targets(dataset, test_split)
     n_ep = h.shape[0]
     half = n_ep // 2
     results = {}
@@ -245,14 +270,19 @@ def drift_figure(curves, warmup):
     return fig
 
 
+def _show_frame(ax, frame):
+    if frame.shape[-1] == 1:
+        ax.imshow(np.clip(frame[..., 0], 0, 1), cmap="gray", vmin=0, vmax=1)
+    else:
+        ax.imshow(np.clip(frame, 0, 1))
+
+
 def filmstrip_figure(pred_frames, true_frames, episode: int = 0):
     ks = [1, 2, 4, 6, 10, 15, 22, 30]
     fig, axes = plt.subplots(2, len(ks), figsize=(1.2 * len(ks), 2.8))
     for i, k in enumerate(ks):
-        axes[0, i].imshow(true_frames[k - 1, episode, :, :, 0],
-                          cmap="gray", vmin=0, vmax=1)
-        axes[1, i].imshow(np.clip(pred_frames[k - 1, episode, :, :, 0], 0, 1),
-                          cmap="gray", vmin=0, vmax=1)
+        _show_frame(axes[0, i], true_frames[k - 1, episode])
+        _show_frame(axes[1, i], pred_frames[k - 1, episode])
         axes[0, i].set_title(f"k={k}", fontsize=8)
         for row in (0, 1):
             axes[row, i].axis("off")
@@ -265,10 +295,13 @@ def train(config: Config) -> dict:
         raise SystemExit(
             f"{run_dir} already exists; pick another --run-name or delete it"
         )
+    dataset_peek = data_lib.load(config.data_path)
     tracker = Tracker(
         run_dir,
         {
             **dataclasses.asdict(config),
+            "obs_channels": int(dataset_peek["obs"].shape[-1]),
+            "has_reward": "reward" in dataset_peek,
             "jax_backend": jax.default_backend(),
             "jax_devices": [str(d) for d in jax.devices()],
         },
@@ -276,20 +309,25 @@ def train(config: Config) -> dict:
         run_name=config.run_name,
     )
 
-    dataset = data_lib.load(config.data_path)
+    dataset = dataset_peek
     train_split, val_split, test_split = data_lib.splits(dataset["obs"].shape[0])
     obs, actions = dataset["obs"], dataset["action"]
+    rewards = dataset.get("reward")
+    has_reward = rewards is not None
+    obs_channels = obs.shape[-1]
 
     model = RSSM(
         latent_dim=config.latent_dim,
         action_dim=actions.shape[-1],
         hidden=config.hidden,
         min_sigma=config.min_sigma,
+        obs_channels=obs_channels,
     )
     root_key = jax.random.PRNGKey(config.seed)
     init_key, val_key = jax.random.split(root_key)
     params = model.init(
-        init_key, jnp.zeros((1, 32, 32, 1)), model.initial_state(1),
+        init_key, jnp.zeros((1, 32, 32, obs_channels)),
+        model.initial_state(1),
         jnp.zeros((1, config.latent_dim)), jnp.zeros((1, actions.shape[-1])),
     )
     tx = optax.chain(
@@ -299,43 +337,51 @@ def train(config: Config) -> dict:
     state = train_state.TrainState.create(
         apply_fn=model.apply, params=params, tx=tx
     )
-    sequence_loss = make_losses(model, config)
+    sequence_loss = make_losses(model, config, has_reward)
 
     @jax.jit
-    def train_step(state, obs_seq, act_seq, key, beta):
+    def train_step(state, obs_seq, act_seq, rew_seq, key, beta):
         grad_fn = jax.value_and_grad(sequence_loss, has_aux=True)
-        (loss, (recon, kl)), grads = grad_fn(state.params, obs_seq, act_seq,
-                                             key, beta)
-        return state.apply_gradients(grads=grads), loss, recon, kl
+        (loss, (recon, kl, rew)), grads = grad_fn(
+            state.params, obs_seq, act_seq, rew_seq, key, beta)
+        return state.apply_gradients(grads=grads), loss, recon, kl, rew
 
     @jax.jit
-    def eval_loss(params, obs_seq, act_seq, beta):
-        loss, (recon, kl) = sequence_loss(params, obs_seq, act_seq,
-                                          val_key, beta)
-        return recon, kl
+    def eval_loss(params, obs_seq, act_seq, rew_seq, beta):
+        loss, (recon, kl, rew) = sequence_loss(params, obs_seq, act_seq,
+                                               rew_seq, val_key, beta)
+        return recon, kl, rew
 
     rng = np.random.default_rng(config.seed)
     val_rng = np.random.default_rng(config.seed + 1)
-    val_obs, val_act = sample_pixel_batch(
-        val_rng, obs, actions, val_split, config.transitions, 64
+    val_obs, val_act, val_rew = sample_pixel_batch(
+        val_rng, obs, actions, rewards, val_split, config.transitions, 64
     )
 
     for step in range(1, config.steps + 1):
-        obs_seq, act_seq = sample_pixel_batch(
-            rng, obs, actions, train_split, config.transitions,
+        obs_seq, act_seq, rew_seq = sample_pixel_batch(
+            rng, obs, actions, rewards, train_split, config.transitions,
             config.batch_size,
         )
         step_key = jax.random.fold_in(root_key, step)
         beta = beta_at(config, step)
-        state, loss, recon, kl = train_step(state, obs_seq, act_seq,
-                                            step_key, beta)
+        state, loss, recon, kl, rew = train_step(state, obs_seq, act_seq,
+                                                 rew_seq, step_key, beta)
         if step % config.log_every == 0:
-            tracker.log(step, loss=loss, recon=recon, kl=kl)
+            metrics = {"loss": loss, "recon": recon, "kl": kl}
+            if has_reward:
+                metrics["reward_mse"] = rew
+            tracker.log(step, **metrics)
         if step % config.val_every == 0:
-            v_recon, v_kl = eval_loss(state.params, val_obs, val_act, beta)
-            tracker.log(step, val_recon=v_recon, val_kl=v_kl)
+            v_recon, v_kl, v_rew = eval_loss(state.params, val_obs, val_act,
+                                             val_rew, beta)
+            metrics = {"val_recon": v_recon, "val_kl": v_kl}
+            if has_reward:
+                metrics["val_reward_mse"] = v_rew
+            tracker.log(step, **metrics)
             print(f"step {step:6d}  recon {recon:8.3f}  kl {kl:7.3f}  "
-                  f"val recon {v_recon:8.3f}  val kl {v_kl:7.3f}")
+                  f"rew {rew:7.4f}  val recon {v_recon:8.3f}  "
+                  f"val kl {v_kl:7.3f}")
 
     (run_dir / "checkpoint.msgpack").write_bytes(
         serialization.to_bytes(state.params)

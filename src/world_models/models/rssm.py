@@ -45,18 +45,27 @@ class GaussianHead(nn.Module):
         return mu, sigma
 
 
+class RewardHead(nn.Module):
+    @nn.compact
+    def __call__(self, x):
+        x = nn.silu(nn.Dense(128)(x))
+        return nn.Dense(1)(x)[..., 0]
+
+
 class RSSM(nn.Module):
     latent_dim: int = 16
     action_dim: int = 2
     hidden: int = 128
     min_sigma: float = 0.1
+    obs_channels: int = 1
 
     def setup(self):
         self.core = nn.GRUCell(features=self.hidden)
         self.encoder = ConvEncoder()
         self.prior_head = GaussianHead(self.latent_dim, self.min_sigma)
         self.post_head = GaussianHead(self.latent_dim, self.min_sigma)
-        self.decoder = Decoder()
+        self.decoder = Decoder(out_channels=self.obs_channels)
+        self.reward_head = RewardHead()
 
     def __call__(self, o, h, z, a):
         """Exercise every submodule once — used only for init."""
@@ -64,7 +73,8 @@ class RSSM(nn.Module):
         h = self.core_step(h, z, a)
         mu_p, sig_p = self.prior_dist(h)
         mu_q, sig_q = self.post_dist(h, e)
-        return self.decode(h, mu_q), (mu_p, sig_p), (mu_q, sig_q)
+        return (self.decode(h, mu_q), (mu_p, sig_p), (mu_q, sig_q),
+                self.reward(h, mu_q))
 
     def encode(self, o):
         return self.encoder(o)
@@ -83,8 +93,38 @@ class RSSM(nn.Module):
     def decode(self, h, z):
         return self.decoder(jnp.concatenate([h, z], axis=-1))
 
+    def reward(self, h, z):
+        return self.reward_head(jnp.concatenate([h, z], axis=-1))
+
     def initial_state(self, batch_size: int) -> jnp.ndarray:
         return jnp.zeros((batch_size, self.hidden))
+
+
+def load_rssm(run_dir):
+    """Load a trained RSSM from a run directory -> (model, params)."""
+    import json
+    from pathlib import Path
+
+    from flax import serialization
+
+    run_dir = Path(run_dir)
+    cfg = json.loads((run_dir / "config.json").read_text())
+    model = RSSM(
+        latent_dim=cfg["latent_dim"],
+        hidden=cfg["hidden"],
+        min_sigma=cfg["min_sigma"],
+        obs_channels=cfg.get("obs_channels", 1),
+    )
+    c = model.obs_channels
+    template = model.init(
+        jax.random.PRNGKey(0), jnp.zeros((1, 32, 32, c)),
+        model.initial_state(1), jnp.zeros((1, model.latent_dim)),
+        jnp.zeros((1, model.action_dim)),
+    )
+    params = serialization.from_bytes(
+        template, (run_dir / "checkpoint.msgpack").read_bytes()
+    )
+    return model, params
 
 
 def kl_gauss(mu_q, sig_q, mu_p, sig_p):

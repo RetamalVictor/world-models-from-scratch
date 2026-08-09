@@ -17,14 +17,28 @@ def _tiny_model_and_params(latent=8, hidden=32):
 
 def test_cell_shapes_and_sigma_floor():
     model, params = _tiny_model_and_params()
-    o_hat, (mu_p, sig_p), (mu_q, sig_q) = model.apply(
+    o_hat, (mu_p, sig_p), (mu_q, sig_q), r_hat = model.apply(
         params, jnp.zeros((2, 32, 32, 1)), model.initial_state(2),
         jnp.zeros((2, 8)), jnp.zeros((2, 2)),
     )
     assert o_hat.shape == (2, 32, 32, 1)
     assert mu_p.shape == (2, 8) and mu_q.shape == (2, 8)
+    assert r_hat.shape == (2,)
     assert float(sig_p.min()) >= 0.1
     assert float(sig_q.min()) >= 0.1
+
+
+def test_rgb_channels():
+    model = RSSM(latent_dim=8, hidden=32, obs_channels=3)
+    params = model.init(
+        jax.random.PRNGKey(0), jnp.zeros((2, 32, 32, 3)),
+        model.initial_state(2), jnp.zeros((2, 8)), jnp.zeros((2, 2)),
+    )
+    o_hat, _, _, _ = model.apply(
+        params, jnp.zeros((2, 32, 32, 3)), model.initial_state(2),
+        jnp.zeros((2, 8)), jnp.zeros((2, 2)),
+    )
+    assert o_hat.shape == (2, 32, 32, 3)
 
 
 def test_kl_gauss_is_zero_for_identical_gaussians():
@@ -83,6 +97,7 @@ def test_overfits_a_tiny_batch():
     model, params = _tiny_model_and_params()
     config = Config(latent_dim=8, alpha=0.8)
     sequence_loss = make_losses(model, config)
+    rew_seq = jnp.zeros(obs_seq.shape[:2])
     state = train_state.TrainState.create(
         apply_fn=model.apply, params=params, tx=optax.adam(3e-3)
     )
@@ -90,8 +105,8 @@ def test_overfits_a_tiny_batch():
     @jax.jit
     def step(state, key):
         grad_fn = jax.value_and_grad(sequence_loss, has_aux=True)
-        (loss, _), grads = grad_fn(state.params, obs_seq, act_seq, key,
-                                   jnp.float32(1.0))
+        (loss, _), grads = grad_fn(state.params, obs_seq, act_seq, rew_seq,
+                                   key, jnp.float32(1.0))
         return state.apply_gradients(grads=grads), loss
 
     _, initial = step(state, jax.random.PRNGKey(1))

@@ -56,15 +56,34 @@ def pixel_mse_per_horizon(pred_frames, true_frames):
     return jnp.mean((pred_frames - true_frames) ** 2, axis=(1, 2, 3, 4))
 
 
+def single_gif(frames, out_path, scale: int = 4, duration_ms: int = 50):
+    """One float array in [0,1], (T, H, W) or (T, H, W, 3), to a gif."""
+    rgb = frames.ndim == 4
+    imgs = []
+    for t in range(frames.shape[0]):
+        arr = (np.clip(frames[t], 0, 1) * 255).astype(np.uint8)
+        img = Image.fromarray(arr, mode="RGB" if rgb else "L")
+        img = img.resize((img.width * scale, img.height * scale),
+                         Image.NEAREST)
+        imgs.append(img)
+    imgs[0].save(out_path, save_all=True, append_images=imgs[1:],
+                 duration=duration_ms, loop=0)
+
+
 def side_by_side_gif(frames_a, frames_b, out_path, scale: int = 4,
                      duration_ms: int = 50):
-    """Two aligned (T, H, W) float arrays in [0,1] -> one gif, A | B."""
-    divider = np.full((frames_a.shape[1], 2), 1.0)
+    """Two aligned float arrays in [0,1] -> one gif, A | B.
+
+    Accepts (T, H, W) grayscale or (T, H, W, 3) RGB frames.
+    """
+    rgb = frames_a.ndim == 4
+    div_shape = (frames_a.shape[1], 2, 3) if rgb else (frames_a.shape[1], 2)
+    divider = np.full(div_shape, 1.0)
     imgs = []
     for t in range(frames_a.shape[0]):
         strip = np.concatenate([frames_a[t], divider, frames_b[t]], axis=1)
-        img = Image.fromarray((np.clip(strip, 0, 1) * 255).astype(np.uint8),
-                              mode="L")
+        arr = (np.clip(strip, 0, 1) * 255).astype(np.uint8)
+        img = Image.fromarray(arr, mode="RGB" if rgb else "L")
         img = img.resize((img.width * scale, img.height * scale),
                          Image.NEAREST)
         imgs.append(img)
