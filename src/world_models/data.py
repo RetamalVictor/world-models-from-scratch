@@ -18,9 +18,22 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from world_models.envs import EnvParams, collect_trajectory, random_nudge_policy
+from world_models.envs import (
+    EnvParams,
+    GoalEnvParams,
+    collect_goal_trajectory,
+    collect_trajectory,
+    random_nudge_policy,
+)
 
 DEFAULT_PATH = Path("data/ball.npz")
+
+# task -> (goal_speed, default output path); "plain" is the v1 env.
+TASKS = {
+    "plain": (None, "data/ball.npz"),
+    "hover": (0.0, "data/ball_hover.npz"),
+    "follow": (1.0, "data/ball_follow.npz"),
+}
 
 
 def generate(
@@ -51,6 +64,30 @@ def generate(
     }
 
 
+def generate_goal(
+    seed: int = 0,
+    n_episodes: int = 500,
+    n_steps: int = 200,
+    nudge: float = 0.3,
+    goal_speed: float = 0.0,
+    params: GoalEnvParams | None = None,
+) -> dict:
+    """Generate an env-v2 dataset (RGB obs, reward, goal ground truth)."""
+    if params is None:
+        params = GoalEnvParams(goal_speed=goal_speed)
+    keys = jax.random.split(jax.random.PRNGKey(seed), n_episodes)
+    policy = random_nudge_policy(nudge)
+    rollout = jax.vmap(
+        lambda k: collect_goal_trajectory(k, policy, n_steps, params)
+    )(keys)
+    rollout = jax.device_get(rollout)
+    out = {"obs": np.round(rollout["obs"] * 255.0).astype(np.uint8)}
+    for k in ("action", "reward", "x", "y", "vx", "vy",
+              "gx", "gy", "gvx", "gvy"):
+        out[k] = rollout[k].astype(np.float32)
+    return out
+
+
 def stats_report(dataset: dict, meta: dict) -> dict:
     """Summary statistics of a generated dataset.
 
@@ -61,7 +98,7 @@ def stats_report(dataset: dict, meta: dict) -> dict:
     """
     obs = dataset["obs"].astype(np.float32) / 255.0
     speed = np.sqrt(dataset["vx"] ** 2 + dataset["vy"] ** 2)
-    return {
+    report = {
         **meta,
         "pixel_mean": float(obs.mean()),
         "pixel_std": float(obs.std()),
@@ -73,6 +110,10 @@ def stats_report(dataset: dict, meta: dict) -> dict:
         "vy_std": float(dataset["vy"].std()),
         "speed_mean": float(speed.mean()),
     }
+    if "reward" in dataset:
+        report["reward_mean"] = float(dataset["reward"].mean())
+        report["reward_std"] = float(dataset["reward"].std())
+    return report
 
 
 def load(path: str | Path = DEFAULT_PATH) -> dict:
@@ -107,24 +148,36 @@ def to_float(frames_uint8: np.ndarray) -> jnp.ndarray:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate the ball dataset")
+    parser = argparse.ArgumentParser(description="Generate a ball dataset")
+    parser.add_argument("--task", choices=sorted(TASKS), default="plain")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--episodes", type=int, default=500)
     parser.add_argument("--steps", type=int, default=200)
     parser.add_argument("--nudge", type=float, default=0.3)
-    parser.add_argument("--out", type=str, default=str(DEFAULT_PATH))
+    parser.add_argument("--goal-speed", type=float, default=None,
+                        help="override the task's default goal speed")
+    parser.add_argument("--out", type=str, default=None)
     args = parser.parse_args()
 
-    dataset = generate(args.seed, args.episodes, args.steps, args.nudge)
-    out = Path(args.out)
+    task_speed, task_path = TASKS[args.task]
+    out = Path(args.out or task_path)
+    if args.task == "plain":
+        dataset = generate(args.seed, args.episodes, args.steps, args.nudge)
+        goal_speed = None
+    else:
+        goal_speed = task_speed if args.goal_speed is None else args.goal_speed
+        dataset = generate_goal(args.seed, args.episodes, args.steps,
+                                args.nudge, goal_speed)
     out.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(out, **dataset)
 
     meta = {
+        "task": args.task,
         "seed": args.seed,
         "n_episodes": args.episodes,
         "n_steps": args.steps,
         "nudge": args.nudge,
+        "goal_speed": goal_speed,
     }
     report = stats_report(dataset, meta)
     stats_path = out.with_suffix(".stats.json")

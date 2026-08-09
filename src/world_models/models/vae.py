@@ -30,6 +30,8 @@ class Encoder(nn.Module):
 
 
 class Decoder(nn.Module):
+    out_channels: int = 1
+
     @nn.compact
     def __call__(self, z):  # (B, latent_dim)
         x = nn.silu(nn.Dense(256)(z))
@@ -37,8 +39,8 @@ class Decoder(nn.Module):
         x = x.reshape((-1, 4, 4, 128))
         x = nn.silu(nn.ConvTranspose(64, (4, 4), strides=(2, 2))(x))  # (B, 8, 8, 64)
         x = nn.silu(nn.ConvTranspose(32, (4, 4), strides=(2, 2))(x))  # (B, 16, 16, 32)
-        x = nn.ConvTranspose(1, (4, 4), strides=(2, 2))(x)            # (B, 32, 32, 1)
-        return x
+        x = nn.ConvTranspose(self.out_channels, (4, 4), strides=(2, 2))(x)
+        return x                                                      # (B, 32, 32, C)
 
 
 class VAE(nn.Module):
