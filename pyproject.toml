@@ -25,6 +25,7 @@ ball-demo = "world_models.demo:main"
 make-data = "world_models.data:main"
 train-vae = "world_models.train_vae:main"
 train-gru = "world_models.train_gru:main"
+train-rssm = "world_models.train_rssm:main"
 
 [dependency-groups]
 dev = [
