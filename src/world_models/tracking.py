@@ -76,13 +76,19 @@ class Tracker:
         self._metrics = open(self.dir / "metrics.jsonl", "a")
         self._wandb = None
         if wandb_project:
-            import wandb  # optional dependency: uv sync --extra wandb
-            self._wandb = wandb.init(
-                project=wandb_project,
-                name=run_name,
-                config=config,
-                dir=str(self.dir),
-            )
+            # Best effort: the jsonl is canonical, so a missing wandb
+            # install or login degrades to local-only, never to a crash
+            # ten minutes into a long run.
+            try:
+                import wandb  # optional dependency: uv sync --extra wandb
+                self._wandb = wandb.init(
+                    project=wandb_project,
+                    name=run_name,
+                    config=config,
+                    dir=str(self.dir),
+                )
+            except Exception as e:
+                print(f"wandb mirror disabled ({e}); continuing local-only")
 
     def log(self, step: int, **metrics):
         row = {"step": step, **{k: float(v) for k, v in metrics.items()}}

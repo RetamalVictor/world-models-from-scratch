@@ -1,7 +1,7 @@
 [project]
 name = "world-models"
 version = "0.1.0"
-description = "World models from scratch in JAX: bouncing ball, RSSM, then DOOM"
+description = "World models from scratch in JAX: VAE, RSSM, actors in imagination, ViZDoom"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -19,6 +19,8 @@ wandb = ["wandb"]
 # GPU training runs under WSL2 (JAX has no native Windows CUDA support);
 # see docs/gpu-setup.md. The marker keeps Windows installs CPU-only.
 cuda = ["jax[cuda12]; sys_platform == 'linux'"]
+# The engine. Ships the take_cover scenario and a free WAD; nothing to buy.
+doom = ["vizdoom"]
 
 [project.scripts]
 ball-demo = "world_models.demo:main"
@@ -27,6 +29,7 @@ train-vae = "world_models.train_vae:main"
 train-gru = "world_models.train_gru:main"
 train-rssm = "world_models.train_rssm:main"
 train-ac = "world_models.train_ac:main"
+train-online = "world_models.train_online:main"
 
 [dependency-groups]
 dev = [

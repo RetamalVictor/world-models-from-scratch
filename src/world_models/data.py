@@ -91,10 +91,10 @@ def generate_goal(
 def stats_report(dataset: dict, meta: dict) -> dict:
     """Summary statistics of a generated dataset.
 
-    For the ball this is a sanity check. Once data comes from a real env
-    on-policy (Doom), byte-identical regeneration stops being possible and
-    comparing these reports across collection rounds becomes the way to
-    verify two runs saw equivalent data.
+    For the ball this is a sanity check. For on-policy data out of a real
+    engine, byte-identical regeneration is off the table, and comparing
+    these reports across collection rounds is what verifies two runs saw
+    equivalent data.
     """
     obs = dataset["obs"].astype(np.float32) / 255.0
     speed = np.sqrt(dataset["vx"] ** 2 + dataset["vy"] ** 2)
