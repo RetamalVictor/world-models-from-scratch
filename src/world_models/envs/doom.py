@@ -1,4 +1,4 @@
-"""ViZDoom take_cover as a plain Python environment (Phase B).
+"""ViZDoom take_cover as a plain Python environment.
 
 This is the CPU boundary. Everything else in the repo is jittable JAX;
 the Doom engine is a stateful C++ process behind a Python handle, so

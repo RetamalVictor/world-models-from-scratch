@@ -1,4 +1,4 @@
-"""Online Dreamer on the ball (Phase A of the Doom plan).
+"""Online Dreamer on the ball.
 
     uv run train-online --run-name follow
 

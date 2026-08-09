@@ -1,7 +1,7 @@
 [project]
 name = "world-models"
 version = "0.1.0"
-description = "World models from scratch in JAX: bouncing ball, RSSM, then DOOM"
+description = "World models from scratch in JAX: VAE, RSSM, actors in imagination, ViZDoom"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

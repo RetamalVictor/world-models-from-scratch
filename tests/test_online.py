@@ -55,7 +55,7 @@ def test_runner_episode_contract():
 
 
 def test_online_run_writes_run_dir_and_resume_matches(tmp_path):
-    # The Phase A criterion in miniature: an uninterrupted run and a
+    # The resume contract in miniature: an uninterrupted run and a
     # killed-and-resumed run must be the same run, byte for byte.
     final_a = train(_tiny_config(tmp_path, "a", rounds=4))
     train(_tiny_config(tmp_path, "b", rounds=2))

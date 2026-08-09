@@ -131,7 +131,7 @@ def test_terminated_survives_save_load(tmp_path):
 
 
 def test_loads_buffers_written_before_the_terminated_flag(tmp_path):
-    """Phase A files have no terminated array; the ball only times out."""
+    """Older files have no terminated array; the ball only times out."""
     obs, action, reward = _episode(1, 6)
     path = tmp_path / "old_buffer.npz"
     np.savez_compressed(

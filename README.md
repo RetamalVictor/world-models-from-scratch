@@ -1,10 +1,10 @@
 # world models, from scratch
 
-I'm building world models step by step in JAX: the Ha & Schmidhuber (2018)
-recipe first, then Dreamer's RSSM, then an agent that learns to act inside
-its own imagination — and eventually plays DOOM. The write-ups that go with
-each step land on [victor-retamal.com](https://victor-retamal.com); this
-repo is the code, and every number in the posts reproduces from here.
+World models from scratch in JAX, built up step by step: the
+Ha & Schmidhuber (2018) recipe first, then Dreamer's RSSM, then an agent
+that learns to act entirely inside its own imagination. The write-ups that
+go with each step land on [victor-retamal.com](https://victor-retamal.com);
+this repo is the code, and every number in the posts reproduces from here.
 
 The core idea behind the setup: before trusting a world model on a real
 game, train it on a bouncing ball where I control the simulator and know
@@ -16,16 +16,16 @@ hide that ground truth from you.
 
 ![bouncing ball rollout](docs/media/bouncing_ball.gif)
 
-## Status
+## What's inside
 
-- [x] Step 0: bouncing ball environment (gymnax-style, pure JAX)
-- [x] Step 1: VAE + velocity probe baseline
-- [x] Step 2: frozen encoder + GRU dynamics (Ha-style)
-- [x] Step 3: joint RSSM (Dreamer-style)
-- [x] Step 4: actor-critic in imagination (goal env, reward from pixels)
-- [x] Online loop: collect -> train, checkpoint/resume, replay buffer
-- [x] ViZDoom take_cover wrapper, 64x64 model scaling, continue head
-- [ ] DOOM: world model on take_cover, then the full online agent
+- Step 0 — bouncing ball environment (gymnax-style, pure JAX)
+- Step 1 — VAE + the velocity probe baseline
+- Step 2 — frozen encoder + GRU dynamics (Ha-style)
+- Step 3 — joint RSSM (Dreamer-style)
+- Step 4 — actor-critic in imagination (goal env, reward from pixels)
+- The online loop: collect -> train, checkpoint/resume, replay buffer
+- A ViZDoom take_cover wrapper, 64x64 model scaling, and the continue
+  head a terminating environment needs
 
 The measurement that threads the steps together — a ridge probe from the
 model state to the true ball velocity, identical protocol everywhere:
