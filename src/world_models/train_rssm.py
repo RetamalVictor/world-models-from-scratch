@@ -29,7 +29,12 @@ import matplotlib.pyplot as plt
 from world_models import data as data_lib
 from world_models import probe as probe_lib
 from world_models import rollout as rollout_lib
-from world_models.models.rssm import RSSM, kl_balanced, kl_gauss
+from world_models.models.rssm import (
+    RSSM,
+    continue_bce,
+    kl_balanced,
+    kl_gauss,
+)
 from world_models.plotstyle import AQUA, BASELINE, BLUE, MUTED, style
 from world_models.tracking import Tracker, metrics_figure
 
@@ -81,11 +86,28 @@ def sample_pixel_batch(rng, obs, actions, rewards, episodes, transitions,
             jnp.asarray(r.transpose(1, 0)))
 
 
-def make_losses(model: RSSM, config: Config, has_reward: bool = False):
-    def sequence_loss(params, obs_seq, act_seq, rew_seq, key, beta):
-        """obs_seq: (T+1, B, H, W, C) time-major. Recon on every frame,
+def make_losses(model: RSSM, config: Config, has_reward: bool = False,
+                has_continue: bool = False):
+    """Build the joint sequence loss.
+
+    has_continue needs a model with predict_continue=True; it slots a
+    con_seq argument in after rew_seq and grows the aux tuple to four.
+    Left off, both the signature and the numbers are the ones Steps 3-4
+    trained against.
+    """
+    def bce(params, h, z, c_t):
+        logit = model.apply(params, h, z, method=RSSM.continue_logit)
+        return continue_bce(logit, c_t).mean()
+
+    def sequence_loss(params, obs_seq, act_seq, rew_seq, *rest):
+        """(params, obs_seq, act_seq, rew_seq, [con_seq,] key, beta).
+
+        obs_seq: (T+1, B, H, W, C) time-major. Recon on every frame,
         KL on frames 1..T (frame 0 has no meaningful prior), reward MSE
-        on every frame when the dataset has rewards."""
+        on every frame when the dataset has rewards, continue BCE on
+        every frame when it has deaths.
+        """
+        con_seq, key, beta = rest if has_continue else (None, *rest)
         t1, b = obs_seq.shape[0], obs_seq.shape[1]
         e = model.apply(params, obs_seq.reshape((-1,) + obs_seq.shape[2:]),
                         method=RSSM.encode).reshape(t1, b, -1)
@@ -98,10 +120,12 @@ def make_losses(model: RSSM, config: Config, has_reward: bool = False):
         recon0 = ((o_hat0 - obs_seq[0]) ** 2).sum(axis=(1, 2, 3)).mean()
         r_hat0 = model.apply(params, h0, z0, method=RSSM.reward)
         rew0 = ((r_hat0 - rew_seq[0]) ** 2).mean()
+        con0 = (bce(params, h0, z0, con_seq[0]) if has_continue
+                else jnp.float32(0.0))
 
         def step(carry, xs):
             h, z = carry
-            e_t, o_t, a_t, r_t, n_t = xs
+            e_t, o_t, a_t, r_t, n_t = xs[:5]
             h = model.apply(params, h, z, a_t, method=RSSM.core_step)
             mu_p, sig_p = model.apply(params, h, method=RSSM.prior_dist)
             mu_q, sig_q = model.apply(params, h, e_t, method=RSSM.post_dist)
@@ -112,17 +136,24 @@ def make_losses(model: RSSM, config: Config, has_reward: bool = False):
             rew = ((r_hat - r_t) ** 2).mean()
             klb = kl_balanced(mu_q, sig_q, mu_p, sig_p, config.alpha).mean()
             klr = kl_gauss(mu_q, sig_q, mu_p, sig_p).mean()
-            return (h, z), (recon, rew, klb, klr)
+            con = (bce(params, h, z, xs[5]) if has_continue
+                   else jnp.float32(0.0))
+            return (h, z), (recon, rew, klb, klr, con)
 
-        _, (recons, rews, klbs, klrs) = jax.lax.scan(
-            step, (h0, z0),
-            (e[1:], obs_seq[1:], act_seq[1:], rew_seq[1:], noise[1:]),
-        )
+        inputs = (e[1:], obs_seq[1:], act_seq[1:], rew_seq[1:], noise[1:])
+        if has_continue:
+            inputs += (con_seq[1:],)
+        _, (recons, rews, klbs, klrs, cons) = jax.lax.scan(
+            step, (h0, z0), inputs)
         recon = (recon0 + recons.sum()) / t1
         rew = (rew0 + rews.sum()) / t1 if has_reward else jnp.float32(0.0)
         klb = klbs.mean()
         klr = klrs.mean()
-        return recon + rew + beta * klb, (recon, klr, rew)
+        loss = recon + rew + beta * klb
+        if not has_continue:
+            return loss, (recon, klr, rew)
+        con = (con0 + cons.sum()) / t1
+        return loss + con, (recon, klr, rew, con)
 
     return sequence_loss
 

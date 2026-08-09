@@ -105,6 +105,10 @@ class ReplayBuffer:
             jnp.asarray(rew.transpose(1, 0)),
         )
 
+    def longest_episode(self) -> dict:
+        """The stored episode with the most frames — filmstrip material."""
+        return max(self._episodes, key=lambda ep: ep["obs"].shape[0])
+
     def sample_sequences(self, rng: np.random.Generator, batch_size: int,
                          transitions: int):
         """Uniform over every valid (episode, start) pair.

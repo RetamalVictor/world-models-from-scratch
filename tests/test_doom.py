@@ -54,6 +54,18 @@ def test_scripted_policy_dies_and_reward_counts_survival(env):
     assert total == pytest.approx(survived / 100.0)
 
 
+def test_died_distinguishes_death_from_reset(env):
+    env.reset()
+    assert env.died is False
+    done = False
+    for _ in range(STEP_CAP):
+        _, _, done = env.step(0)
+        if done:
+            break
+    assert done, f"no death in {STEP_CAP} steps"
+    assert env.died is True
+
+
 def test_frame_size_is_configurable():
     with DoomTakeCover(frame_size=32, seed=0) as small:
         assert small.reset().shape == (32, 32, 1)

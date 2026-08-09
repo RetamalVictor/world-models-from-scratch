@@ -79,6 +79,18 @@ class DoomTakeCover:
             self._last_obs = self._frame()
         return self._last_obs, 0.0 if done else 0.01, done
 
+    @property
+    def died(self) -> bool:
+        """True iff the episode is over and it ended in death.
+
+        take_cover's own timeout is off by default (episode_timeout=0
+        in its cfg) so death is currently the only way an episode ends,
+        but the distinction matters for the replay buffer's continue
+        targets (see replay.py), so it is checked rather than assumed.
+        False before any episode has run and right after every reset.
+        """
+        return self._game.is_episode_finished() and self._game.is_player_dead()
+
     def close(self):
         if self._game is not None:
             self._game.close()

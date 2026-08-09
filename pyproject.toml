@@ -30,6 +30,7 @@ train-gru = "world_models.train_gru:main"
 train-rssm = "world_models.train_rssm:main"
 train-ac = "world_models.train_ac:main"
 train-online = "world_models.train_online:main"
+train-doom = "world_models.train_doom:main"
 
 [dependency-groups]
 dev = [
