@@ -12,7 +12,11 @@ class FakeEnv:
     """Scripted env, no vizdoom involved: frame value = offset + step
     index, so a stored uint8 frame tells you exactly which step and
     which env instance produced it. die_at=None never ends the episode
-    on its own; max_steps (a timeout) is what stops collect_episode."""
+    on its own; max_steps (a timeout) is what stops collect_episode.
+
+    Unlike the real engine this keeps rendering a fresh frame on the
+    killing step, which is the point: if collect_episode ever stored
+    that step, its value would show up in the frame sequence."""
 
     action_dim = 3
 
@@ -48,14 +52,18 @@ def test_death_episode_contract():
     env = FakeEnv(die_at=5)
     ep = collect_episode(env, RandomPolicy(env.action_dim, seed=0), 20)
 
-    assert ep["obs"].shape == (6, 4, 4, 1) and ep["obs"].dtype == np.uint8
-    assert ep["action"].shape == (6, 3) and ep["action"].dtype == np.float32
-    assert ep["reward"].shape == (6,) and ep["reward"].dtype == np.float32
+    # Five steps taken, five rows stored: the reset frame plus the four
+    # steps that were survived. The killing step is dropped, so a death
+    # episode stores exactly die_at frames.
+    assert ep["obs"].shape == (5, 4, 4, 1) and ep["obs"].dtype == np.uint8
+    assert ep["action"].shape == (5, 3) and ep["action"].dtype == np.float32
+    assert ep["reward"].shape == (5,) and ep["reward"].dtype == np.float32
     assert ep["reward"][0] == pytest.approx(0.01)
     np.testing.assert_array_equal(ep["action"][0], 0.0)
     assert ep["terminated"] is True
-    # frame values round-trip to the step index that produced them
-    np.testing.assert_array_equal(ep["obs"][:, 0, 0, 0], np.arange(6))
+    # frame values round-trip to the step index that produced them, and
+    # step 5 — the one that killed — is absent
+    np.testing.assert_array_equal(ep["obs"][:, 0, 0, 0], np.arange(5))
 
 
 def test_truncation_episode_contract():
@@ -73,11 +81,13 @@ def test_truncation_episode_contract():
 
 def test_death_and_truncation_give_correct_continue_targets():
     """Round-trip through ReplayBuffer: the death episode's last frame
-    is the only 0.0 continue target anywhere; the timeout stays all
-    ones. Both episodes are 5 frames long and transitions=4 leaves
-    exactly one valid start each, so every sample is a whole episode."""
+    is the only 0.0 continue target anywhere, and it is the last frame
+    the env actually rendered; the timeout stays all ones. die_at=5
+    stores 5 frames and 4 timeout steps store 5 too, so transitions=4
+    leaves exactly one valid start each and every sample is a whole
+    episode."""
     policy = RandomPolicy(3, seed=1)
-    death_ep = collect_episode(FakeEnv(die_at=4, offset=0), policy, 10)
+    death_ep = collect_episode(FakeEnv(die_at=5, offset=0), policy, 10)
     timeout_ep = collect_episode(FakeEnv(die_at=None, offset=200), policy, 4)
     assert death_ep["obs"].shape[0] == timeout_ep["obs"].shape[0] == 5
 

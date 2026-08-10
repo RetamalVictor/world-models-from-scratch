@@ -12,11 +12,16 @@ class FakeDoom:
     buffer holds both deaths and timeouts). Constructed fresh per
     train() call, so an interrupted-and-resumed run sees exactly the
     episodes the uninterrupted one saw — the property the resume test
-    needs and the real engine cannot offer."""
+    needs and the real engine cannot offer.
+
+    collect.py drops the killing step, so a death episode stores
+    exactly die_at frames. Every die_at here is > transitions in the
+    tiny config, which is what keeps each stored death episode
+    sampleable."""
 
     action_dim = 3
 
-    def __init__(self, die_ats=(5, None, 7), size=32):
+    def __init__(self, die_ats=(6, None, 8), size=32):
         self.die_ats = die_ats
         self.size = size
         self._episode = -1
@@ -96,11 +101,11 @@ def test_resume_matches_uninterrupted(tmp_path):
     # index-dependent schedule would desynchronize from the global
     # episode counter. Byte-identity is about the training math.
     train(_tiny_config(tmp_path, "a", rounds=4),
-          env_factory=lambda c: FakeDoom(die_ats=(6,)))
+          env_factory=lambda c: FakeDoom(die_ats=(7,)))
     train(_tiny_config(tmp_path, "b", rounds=2),
-          env_factory=lambda c: FakeDoom(die_ats=(6,)))
+          env_factory=lambda c: FakeDoom(die_ats=(7,)))
     train(_tiny_config(tmp_path, "b", rounds=4, resume=True),
-          env_factory=lambda c: FakeDoom(die_ats=(6,)))
+          env_factory=lambda c: FakeDoom(die_ats=(7,)))
 
     ckpt_a = (tmp_path / "a" / "checkpoints" /
               "step_00000004.msgpack").read_bytes()

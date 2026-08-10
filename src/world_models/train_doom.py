@@ -444,9 +444,16 @@ def train(config: Config, env_factory=make_env) -> dict:
             act = jnp.asarray(episode["action"][None]).transpose(1, 0, 2)
             h_seq, z_seq = filter_episodes(model, wm_state.params,
                                            obs[:warmup], act[:warmup])
+            # Sampled prior, not the mean. The mean rollout almost
+            # never spawns a fireball and smears the ones already in
+            # flight, so a mean filmstrip undersells the model and
+            # shows a world the actor never trains in. The key is fixed
+            # off the run seed so the artifact stays reproducible.
+            noise = jax.random.normal(jax.random.PRNGKey(config.seed + 7),
+                                      (horizon, 1, config.latent_dim))
             frames = rollout_prior(model, wm_state.params,
                                    h_seq[warmup - 1], z_seq[warmup - 1],
-                                   act[warmup:warmup + horizon])
+                                   act[warmup:warmup + horizon], noise)
             true = obs[warmup:warmup + horizon]
             tracker.log_figure(
                 "dream_filmstrip",

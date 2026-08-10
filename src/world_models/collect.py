@@ -49,6 +49,20 @@ def collect_episode(env, policy, max_steps: int) -> dict:
     died. T <= max_steps: shorter when the episode ends first, and
     hitting the cap without dying is a time limit, not the world
     ending, so terminated stays False.
+
+    The step that kills you is not stored. Doom throws its screen
+    buffer away the moment the player dies, so the wrapper has nothing
+    to hand back but a repeat of the last live frame, and in the buffer
+    I measured every single terminal frame was pixel-identical to its
+    predecessor. Storing them taught the continue head "death = the
+    picture froze" — a state the prior never dreams, which leaves
+    continue-based return truncation inert exactly where it should
+    bite. Dropping the repeat puts replay.py's zero continue target on
+    the last frame the engine really rendered, so the head keys on what
+    the frame shows — the fireball one step away — instead of on
+    frame-freezing, and that is something imagination can and does
+    produce. Nothing is lost with the row: the killing step pays no
+    reward. Timeouts are untouched; their final frame is real.
     """
     obs0 = env.reset()
     policy.reset(obs0)
@@ -62,11 +76,16 @@ def collect_episode(env, policy, max_steps: int) -> dict:
     for _ in range(max_steps):
         a = policy(frame)
         frame, r, done = env.step(a)
+        if done and env.died:
+            # Death: this step's frame is the wrapper's repeat, not an
+            # observation, so it never enters the buffer. The row
+            # already stored carries the 0 continue target.
+            terminated = True
+            break
         obs.append(frame)
         action.append(_as_action_vector(a, env.action_dim))
         reward.append(np.float32(r))
         if done:
-            terminated = bool(env.died)
             break
 
     return {
