@@ -87,17 +87,18 @@ def sample_pixel_batch(rng, obs, actions, rewards, episodes, transitions,
 
 
 def make_losses(model: RSSM, config: Config, has_reward: bool = False,
-                has_continue: bool = False):
+                has_continue: bool = False, death_weight: float = 1.0):
     """Build the joint sequence loss.
 
     has_continue needs a model with predict_continue=True; it slots a
     con_seq argument in after rew_seq and grows the aux tuple to four.
     Left off, both the signature and the numbers are the ones Steps 3-4
-    trained against.
+    trained against. death_weight upweights the rare death frames inside
+    that continue term and does nothing at all with has_continue off.
     """
     def bce(params, h, z, c_t):
         logit = model.apply(params, h, z, method=RSSM.continue_logit)
-        return continue_bce(logit, c_t).mean()
+        return continue_bce(logit, c_t, death_weight).mean()
 
     def sequence_loss(params, obs_seq, act_seq, rew_seq, *rest):
         """(params, obs_seq, act_seq, rew_seq, [con_seq,] key, beta).

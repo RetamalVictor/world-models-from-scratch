@@ -302,6 +302,33 @@ def test_continue_bce_matches_the_definition():
     assert float(continue_bce(jnp.float32(60.0), 1.0)) == pytest.approx(0.0)
 
 
+def test_continue_bce_weights_the_death_class():
+    """The weight makes a wrong "alive" call on a death frame expensive.
+
+    Deaths are a fraction of a percent of the targets, so the head only
+    learns them if they cost more; the alive frames and the default must
+    stay exactly where they were.
+    """
+    logits = jax.random.normal(jax.random.PRNGKey(11), (256,)) * 5.0
+    targets = (jax.random.uniform(jax.random.PRNGKey(12), (256,)) > 0.5
+               ).astype(jnp.float32)
+    # the pre-weighting body, spelled out: weight 1.0 must be bit-for-bit
+    unweighted = (jnp.maximum(logits, 0.0) - logits * targets
+                  + jnp.log1p(jnp.exp(-jnp.abs(logits))))
+    assert jnp.array_equal(continue_bce(logits, targets), unweighted)
+    assert jnp.array_equal(continue_bce(logits, targets, 1.0), unweighted)
+
+    weighted = np.asarray(continue_bce(logits, targets, 8.0))
+    plain, dead = np.asarray(unweighted), np.asarray(targets) == 0.0
+    assert np.array_equal(weighted[~dead], plain[~dead])
+    assert np.allclose(weighted[dead], 8.0 * plain[dead])
+
+    # confidently alive (P ~ 0.98) on a frame that is in fact a death
+    wrong = jnp.float32(4.0)
+    assert (float(continue_bce(wrong, 0.0, 8.0))
+            > float(continue_bce(wrong, 0.0)) > 0.0)
+
+
 def _fixed_batch():
     """One deterministic (obs, act, rew) batch, T+1 = 4, B = 2."""
     k_o, k_a, k_r = jax.random.split(jax.random.PRNGKey(7), 3)

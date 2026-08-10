@@ -74,6 +74,11 @@ class Config:
     beta: float = 1.0
     wm_lr: float = 3e-4
     wm_grad_clip: float = 100.0
+    # A take_cover episode is ~75 frames with one death at the end, so
+    # unweighted the death class is ~1% of the continue head's targets
+    # and "alive everywhere" is a near-optimal head. 64 puts the two
+    # classes on the same order so the head is paid to find the cue.
+    continue_death_weight: float = 64.0
     transitions: int = 32
     batch_size: int = 16
     # actor-critic
@@ -252,7 +257,8 @@ def train(config: Config, env_factory=make_env) -> dict:
     rssm_config = RSSMConfig(latent_dim=config.latent_dim,
                              alpha=config.alpha)
     sequence_loss = make_losses(model, rssm_config, has_reward=True,
-                                has_continue=True)
+                                has_continue=True,
+                                death_weight=config.continue_death_weight)
     actor_loss_fn, critic_loss_fn = make_imagination(
         model, actor, critic, config)
 
