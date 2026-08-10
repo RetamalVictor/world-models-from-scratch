@@ -31,6 +31,7 @@ import dataclasses
 import json
 import time
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 
 import jax
@@ -255,7 +256,11 @@ def train(config: Config, env_factory=make_env) -> dict:
     actor_loss_fn, critic_loss_fn = make_imagination(
         model, actor, critic, config)
 
-    @jax.jit
+    # Donated states: every call site rebinds its state to the returned
+    # one, so the incoming params and optimizer moments are dead the
+    # moment the step returns and XLA can write the update on top of
+    # them instead of allocating a second copy.
+    @partial(jax.jit, donate_argnums=0)
     def wm_step(state, obs_seq, act_seq, rew_seq, con_seq, key):
         grad_fn = jax.value_and_grad(sequence_loss, has_aux=True)
         (loss, (recon, kl, rew, con)), grads = grad_fn(
@@ -263,7 +268,7 @@ def train(config: Config, env_factory=make_env) -> dict:
             jnp.float32(config.beta))
         return state.apply_gradients(grads=grads), loss, recon, kl, rew, con
 
-    @jax.jit
+    @partial(jax.jit, donate_argnums=(1, 2))
     def ac_step(wm_params, actor_state, critic_state, obs_seq, act_seq, key):
         h_seq, z_seq = filter_episodes(model, wm_params, obs_seq, act_seq)
         h0 = h_seq.reshape(-1, h_seq.shape[-1])
@@ -280,7 +285,7 @@ def train(config: Config, env_factory=make_env) -> dict:
         return (actor_state, critic_state, a_loss, c_loss, rewards.mean(),
                 returns.mean())
 
-    # Collection policies. The RSSMPolicy's jits live for the whole
+    # Collection policies. The RSSMPolicy's step jit lives for the whole
     # process; params are re-pointed per episode, never re-traced.
     explore_fn = jax.jit(lambda p, st, k: actor.apply(
         p, st[None], k, method=DiscreteActor.act)[0])

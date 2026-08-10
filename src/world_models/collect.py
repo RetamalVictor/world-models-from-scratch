@@ -100,11 +100,11 @@ class RandomPolicy:
 class RSSMPolicy:
     """Acts from an RSSM belief state filtered online from raw frames.
 
-    encode/core_step/post_dist are each jitted once here, at
-    construction, rather than left to retrace on every Python-level
-    step — this runs once per env step, so re-tracing would dominate.
-    wm/wm_params are frozen for the policy's lifetime, closed over by
-    those jits.
+    The whole step — encode, posterior, act, advance h — is a single
+    jitted function, compiled once at construction. Four separate jits
+    would be four host round-trips per env step, and at Doom's frame
+    size that costs more than the engine does; only wm and act_fn are
+    closed over, so one trace serves the policy's whole lifetime.
 
     act_fn(actor_params, s, key) -> (action_dim,) float action is
     supplied by the caller and is the only place a policy (e.g. the
@@ -131,17 +131,23 @@ class RSSMPolicy:
     def __init__(self, wm: RSSM, act_fn, key, action_dim: int):
         self.action_dim = action_dim
         self._wm = wm
-        self._act_fn = act_fn
         self._key = key
         self._step = 0
         self._wm_params = None
         self._actor_params = None
-        self._encode = jax.jit(
-            lambda p, o: wm.apply(p, o, method=RSSM.encode))
-        self._core_step = jax.jit(
-            lambda p, h, z, a: wm.apply(p, h, z, a, method=RSSM.core_step))
-        self._post_dist = jax.jit(
-            lambda p, h, e: wm.apply(p, h, e, method=RSSM.post_dist))
+
+        def policy_step(wm_params, actor_params, h, obs, key, step):
+            e = wm.apply(wm_params, obs[None], method=RSSM.encode)
+            z, _ = wm.apply(wm_params, h, e, method=RSSM.post_dist)
+            s = jnp.concatenate([h[0], z[0]])
+            action = jnp.asarray(
+                act_fn(actor_params, s, jax.random.fold_in(key, step)),
+                jnp.float32)
+            h = wm.apply(wm_params, h, z, action[None],
+                         method=RSSM.core_step)
+            return action, h
+
+        self._policy_step = jax.jit(policy_step)
 
     def set_params(self, wm_params, actor_params=None):
         self._wm_params = wm_params
@@ -159,12 +165,8 @@ class RSSMPolicy:
         self._step = 0
 
     def __call__(self, obs) -> np.ndarray:
-        e = self._encode(self._wm_params, jnp.asarray(obs)[None])
-        z, _ = self._post_dist(self._wm_params, self._h, e)
-        s = jnp.concatenate([self._h[0], z[0]])
-        key_t = jax.random.fold_in(self._key, self._step)
+        action, self._h = self._policy_step(
+            self._wm_params, self._actor_params, self._h,
+            jnp.asarray(obs), self._key, self._step)
         self._step += 1
-        action = jnp.asarray(
-            self._act_fn(self._actor_params, s, key_t), jnp.float32)
-        self._h = self._core_step(self._wm_params, self._h, z, action[None])
         return np.asarray(action)
