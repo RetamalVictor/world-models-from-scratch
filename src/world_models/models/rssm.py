@@ -216,12 +216,20 @@ def kl_balanced(mu_q, sig_q, mu_p, sig_p, alpha: float = 0.8):
     return alpha * toward_prior + (1.0 - alpha) * toward_post
 
 
-def continue_bce(logits, targets):
+def continue_bce(logits, targets, death_weight: float = 1.0):
     """Bernoulli NLL of the continue flag, elementwise, from logits.
 
     targets: 1.0 where the episode continues past this frame, 0.0 on the
     frame where death ends it. Written in the stable max-form rather
     than log(sigmoid(x)) so a confident head can't produce a NaN.
+
+    death_weight scales the zero-target frames only. Deaths are one
+    frame per episode against dozens of alive ones, so unweighted the
+    cheapest head is the one that says "alive" everywhere and never
+    learns the cue; upweighting the rare class is the standard fix. At
+    the default 1.0 the multiplier is exactly one, so every caller that
+    predates the knob gets the same float it always did.
     """
-    return (jnp.maximum(logits, 0.0) - logits * targets
-            + jnp.log1p(jnp.exp(-jnp.abs(logits))))
+    bce = (jnp.maximum(logits, 0.0) - logits * targets
+           + jnp.log1p(jnp.exp(-jnp.abs(logits))))
+    return bce * (1.0 + (death_weight - 1.0) * (1.0 - targets))

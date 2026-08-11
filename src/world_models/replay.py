@@ -105,6 +105,10 @@ class ReplayBuffer:
             jnp.asarray(rew.transpose(1, 0)),
         )
 
+    def longest_episode(self) -> dict:
+        """The stored episode with the most frames — filmstrip material."""
+        return max(self._episodes, key=lambda ep: ep["obs"].shape[0])
+
     def sample_sequences(self, rng: np.random.Generator, batch_size: int,
                          transitions: int):
         """Uniform over every valid (episode, start) pair.
@@ -131,10 +135,14 @@ class ReplayBuffer:
         )
 
     def save(self, path: str | Path):
+        # Uncompressed: a full buffer is a few hundred MB of frames and
+        # zlib spends more time on it than the checkpoint interval can
+        # afford. np.load reads either format, so older compressed
+        # buffers still restore.
         path = Path(path)
         episodes = list(self._episodes)
         tmp = path.with_name(path.stem + ".incoming.npz")
-        np.savez_compressed(
+        np.savez(
             tmp,
             obs=np.concatenate([ep["obs"] for ep in episodes]),
             action=np.concatenate([ep["action"] for ep in episodes]),

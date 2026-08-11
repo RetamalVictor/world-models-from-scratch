@@ -300,3 +300,117 @@ def test_continue_bce_matches_the_definition():
     # the naive form overflows to inf out here; the stable one does not
     assert float(continue_bce(jnp.float32(60.0), 0.0)) == pytest.approx(60.0)
     assert float(continue_bce(jnp.float32(60.0), 1.0)) == pytest.approx(0.0)
+
+
+def test_continue_bce_weights_the_death_class():
+    """The weight makes a wrong "alive" call on a death frame expensive.
+
+    Deaths are a fraction of a percent of the targets, so the head only
+    learns them if they cost more; the alive frames and the default must
+    stay exactly where they were.
+    """
+    logits = jax.random.normal(jax.random.PRNGKey(11), (256,)) * 5.0
+    targets = (jax.random.uniform(jax.random.PRNGKey(12), (256,)) > 0.5
+               ).astype(jnp.float32)
+    # the pre-weighting body, spelled out: weight 1.0 must be bit-for-bit
+    unweighted = (jnp.maximum(logits, 0.0) - logits * targets
+                  + jnp.log1p(jnp.exp(-jnp.abs(logits))))
+    assert jnp.array_equal(continue_bce(logits, targets), unweighted)
+    assert jnp.array_equal(continue_bce(logits, targets, 1.0), unweighted)
+
+    weighted = np.asarray(continue_bce(logits, targets, 8.0))
+    plain, dead = np.asarray(unweighted), np.asarray(targets) == 0.0
+    assert np.array_equal(weighted[~dead], plain[~dead])
+    assert np.allclose(weighted[dead], 8.0 * plain[dead])
+
+    # confidently alive (P ~ 0.98) on a frame that is in fact a death
+    wrong = jnp.float32(4.0)
+    assert (float(continue_bce(wrong, 0.0, 8.0))
+            > float(continue_bce(wrong, 0.0)) > 0.0)
+
+
+def _fixed_batch():
+    """One deterministic (obs, act, rew) batch, T+1 = 4, B = 2."""
+    k_o, k_a, k_r = jax.random.split(jax.random.PRNGKey(7), 3)
+    return (jax.random.uniform(k_o, (4, 2, 32, 32, 1)),
+            jax.random.normal(k_a, (4, 2, 2)),
+            jax.random.normal(k_r, (4, 2)))
+
+
+def test_loss_without_continues_is_unchanged():
+    """Pinned against the numbers the pre-continue code produced.
+
+    The opt-out path is what Steps 3-4 and train_online run, so it is
+    guarded by value rather than by re-deriving the formula: every
+    number here was printed by make_losses before has_continue existed.
+    """
+    model, params = _tiny_model_and_params()
+    obs_seq, act_seq, rew_seq = _fixed_batch()
+    key, beta = jax.random.PRNGKey(3), jnp.float32(1.0)
+    config = Config(latent_dim=8, alpha=0.8)
+
+    loss, aux = make_losses(model, config)(params, obs_seq, act_seq, rew_seq,
+                                           key, beta)
+    assert len(aux) == 3
+    assert float(loss) == pytest.approx(339.586181640625, rel=1e-5)
+    assert float(aux[0]) == pytest.approx(339.30242919921875, rel=1e-5)
+    assert float(aux[1]) == pytest.approx(0.28375953435897827, rel=1e-5)
+    assert float(aux[2]) == 0.0
+
+    with_rew = make_losses(model, config, has_reward=True)(
+        params, obs_seq, act_seq, rew_seq, key, beta)
+    assert float(with_rew[0]) == pytest.approx(340.82421875, rel=1e-5)
+    assert float(with_rew[1][2]) == pytest.approx(1.2380433082580566, rel=1e-5)
+
+
+def _continue_model():
+    model = RSSM(latent_dim=8, hidden=32, predict_continue=True)
+    params = model.init(
+        jax.random.PRNGKey(0), jnp.zeros((2, 32, 32, 1)),
+        model.initial_state(2), jnp.zeros((2, 8)), jnp.zeros((2, 2)),
+    )
+    return model, params
+
+
+def test_continue_loss_adds_a_fourth_term():
+    model, params = _continue_model()
+    obs_seq, act_seq, rew_seq = _fixed_batch()
+    con_seq = jnp.ones((4, 2))
+    key, beta = jax.random.PRNGKey(3), jnp.float32(1.0)
+    config = Config(latent_dim=8, alpha=0.8)
+    loss_fn = make_losses(model, config, has_reward=True, has_continue=True)
+
+    loss, aux = loss_fn(params, obs_seq, act_seq, rew_seq, con_seq, key, beta)
+    assert len(aux) == 4
+    recon, kl, rew, con = aux
+    assert float(con) > 0.0
+    # weight 1.0, no other term touched
+    off = make_losses(model, config, has_reward=True)(
+        params, obs_seq, act_seq, rew_seq, key, beta)
+    assert float(loss - off[0]) == pytest.approx(float(con), abs=1e-3)
+    for a, b in zip(off[1], (recon, kl, rew)):
+        assert float(a) == pytest.approx(float(b), rel=1e-6)
+
+
+def test_continue_term_responds_to_its_targets():
+    model, params = _continue_model()
+    obs_seq, act_seq, rew_seq = _fixed_batch()
+    key, beta = jax.random.PRNGKey(3), jnp.float32(1.0)
+    loss_fn = make_losses(model, Config(latent_dim=8, alpha=0.8),
+                          has_reward=True, has_continue=True)
+
+    alive = jnp.ones((4, 2))
+    dead = alive.at[2].set(0.0)                    # a death mid-sequence
+    _, (_, _, _, con_alive) = loss_fn(params, obs_seq, act_seq, rew_seq,
+                                      alive, key, beta)
+    _, (_, _, _, con_dead) = loss_fn(params, obs_seq, act_seq, rew_seq,
+                                     dead, key, beta)
+    assert float(con_alive) != float(con_dead)
+
+    def con_only(p):
+        return loss_fn(p, obs_seq, act_seq, rew_seq, dead, key, beta)[1][3]
+
+    head = jax.grad(con_only)(params)["params"]["continue_head"]
+    biggest = max(float(jnp.abs(g).max())
+                  for g in jax.tree_util.tree_leaves(head))
+    assert biggest > 0

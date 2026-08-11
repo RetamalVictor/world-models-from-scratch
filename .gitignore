@@ -16,11 +16,18 @@ wheels/
 # The Doom engine writes its own settings file into the working directory
 _vizdoom.ini
 
-# Data and experiment outputs (regenerable from seeds; see docs/design/vae.md)
+# Data and experiment outputs, all regenerable from a seed and a config
 data/
 checkpoints/
 runs/
 /*.gif
+
+# Local only. The remote carries what is needed to run and understand the
+# experiments; write-up artefacts and the browser export stay on disk.
+docs/
+web/
+scripts/tutorial_diagrams.py
+scripts/export_dream_web.py
 
 # Markdown is reviewed and committed manually; only the README is tracked
 *.md

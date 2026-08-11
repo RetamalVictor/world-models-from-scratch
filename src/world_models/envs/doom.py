@@ -30,8 +30,13 @@ class DoomTakeCover:
     a length-3 one-hot. Each policy step holds the button for
     action_repeat engine tics. The episode ends on death, and the
     engine discards its screen buffer when it does, so the terminal
-    step repeats the last live frame — the continue head, not the
-    pixels, is what tells the model that one apart.
+    step can only repeat the last live frame. That repeat is an
+    artifact of this wrapper, not something the world rendered:
+    collect.py drops it and labels death on the last real observation
+    instead, so the continue head keys on what a frame shows — the
+    fireball about to land — rather than on the picture freezing. See
+    collect_episode for why that distinction decides whether the head
+    is any use inside a dream.
 
     Determinism: the engine replays exactly when the seed is set before
     init() and it is fed back the same action sequence. Nothing weaker
@@ -71,13 +76,27 @@ class DoomTakeCover:
         return self._last_obs
 
     def step(self, action) -> tuple[np.ndarray, float, bool]:
-        """-> (obs, reward, done). The step that kills you pays nothing."""
+        """-> (obs, reward, done). The step that kills you pays nothing,
+        and its obs is the previous frame again — the buffer is gone by
+        then. collect.py discards that row rather than store it."""
         self._game.make_action(self._buttons[self._index(action)],
                                self.action_repeat)
         done = self._game.is_episode_finished()
         if not done:
             self._last_obs = self._frame()
         return self._last_obs, 0.0 if done else 0.01, done
+
+    @property
+    def died(self) -> bool:
+        """True iff the episode is over and it ended in death.
+
+        take_cover's own timeout is off by default (episode_timeout=0
+        in its cfg) so death is currently the only way an episode ends,
+        but the distinction matters for the replay buffer's continue
+        targets (see replay.py), so it is checked rather than assumed.
+        False before any episode has run and right after every reset.
+        """
+        return self._game.is_episode_finished() and self._game.is_player_dead()
 
     def close(self):
         if self._game is not None:

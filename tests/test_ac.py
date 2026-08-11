@@ -2,7 +2,18 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from world_models.models.actor_critic import Actor, Critic, lambda_returns
+from world_models.models.actor_critic import (
+    Actor,
+    Critic,
+    DiscreteActor,
+    lambda_returns,
+)
+
+
+def _discrete_actor(action_dim=3, batch=6):
+    actor = DiscreteActor(action_dim=action_dim)
+    s = jax.random.normal(jax.random.PRNGKey(0), (batch, 144))
+    return actor, s, actor.init(jax.random.PRNGKey(1), s)
 
 
 def test_lambda_returns_closed_form():
@@ -83,3 +94,64 @@ def test_soft_continues_interpolate():
                              continues=continues)
     assert abs(float(returns[1, 0]) - 7.0) < 1e-5
     assert abs(float(returns[0, 0]) - 5.25) < 1e-5
+
+
+def test_discrete_actor_emits_exact_one_hots():
+    actor, s, params = _discrete_actor()
+    a = actor.apply(params, s, jax.random.PRNGKey(2),
+                    method=DiscreteActor.act)
+    assert a.shape == (6, 3)
+    np.testing.assert_array_equal(np.asarray(a).sum(-1), np.ones(6))
+    assert set(np.unique(np.asarray(a))) <= {0.0, 1.0}
+    # same key, same draw
+    again = actor.apply(params, s, jax.random.PRNGKey(2),
+                        method=DiscreteActor.act)
+    np.testing.assert_array_equal(np.asarray(a), np.asarray(again))
+
+
+def test_discrete_actor_greedy_path_is_the_argmax():
+    actor, s, params = _discrete_actor()
+    logits = actor.apply(params, s)
+    det = actor.apply(params, s, None, method=DiscreteActor.act)
+    np.testing.assert_array_equal(np.asarray(det).argmax(-1),
+                                  np.asarray(logits).argmax(-1))
+    np.testing.assert_array_equal(
+        np.asarray(det),
+        np.asarray(actor.apply(params, s, None, method=DiscreteActor.act)),
+    )
+
+
+def test_straight_through_is_hard_forward_and_soft_backward():
+    actor, s, params = _discrete_actor()
+    key = jax.random.PRNGKey(3)
+    st = actor.apply(params, s, key, method=DiscreteActor.sample_st)
+    hard = actor.apply(params, s, key, method=DiscreteActor.act)
+    np.testing.assert_allclose(np.asarray(st), np.asarray(hard), atol=1e-6)
+
+    w = jnp.array([1.0, -2.0, 0.5])
+
+    def score(p):
+        a = actor.apply(p, s, key, method=DiscreteActor.sample_st)
+        return (a * w).sum()
+
+    grads = jax.grad(score)(params)
+    biggest = max(float(jnp.abs(g).max())
+                  for g in jax.tree_util.tree_leaves(grads))
+    assert biggest > 0
+
+
+def test_discrete_actor_entropy():
+    actor, s, params = _discrete_actor(batch=4)
+    logits = actor.apply(params, s)
+    # log_softmax spelled out, so the test does not lean on the module
+    shifted = logits - logits.max(-1, keepdims=True)
+    log_p = shifted - jnp.log(jnp.exp(shifted).sum(-1, keepdims=True))
+    expected = -(jnp.exp(log_p) * log_p).sum(-1)
+    ent = actor.apply(params, s, method=DiscreteActor.entropy)
+    assert ent.shape == (4,)
+    np.testing.assert_allclose(np.asarray(ent), np.asarray(expected),
+                               atol=1e-6)
+    # zeroed params give zero logits, i.e. the uniform maximum
+    flat = actor.apply(jax.tree.map(jnp.zeros_like, params), s,
+                       method=DiscreteActor.entropy)
+    np.testing.assert_allclose(np.asarray(flat), np.log(3.0), atol=1e-6)
