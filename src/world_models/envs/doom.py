@@ -16,7 +16,7 @@ to keep a number the loss depends on.
 
 Two environments live here. DoomTakeCover is that scenario.
 DoomCampaign plays the real game, one map of an IWAD per episode, and
-is what the campaign rungs collect from. They share only the engine
+is what campaign training collects from. They share only the engine
 boilerplate, through the module-level helpers below: everything the
 learning problem is made of (frames, actions, reward, terminal
 flavors) differs between them, deliberately. vizdoom is imported
@@ -201,8 +201,8 @@ class DoomCampaign:
     Actions: a fixed 12-slot vocabulary (ACTIONS), the first nine
     enabled (available_actions). The one-hot dimension is 12 from the
     first collected frame, in replay, in the RSSM's action input and in
-    the actor's head, so switching a reserved slot on later (E1M8 wants
-    retreat fire) is a config flip: no checkpoint migration, no dataset
+    the actor's head, so switching a reserved slot on later is a
+    config flip: no checkpoint migration, no dataset
     schema change, no shape change anywhere, and every frame collected
     before it stays valid, having simply never used that slot. Do not
     shrink this to the nine that are live.
@@ -251,7 +251,7 @@ class DoomCampaign:
         "use", "back", "forward+attack", "back+attack",
     )
     # The last three slots are reserved: present in every shape, never
-    # chosen, waiting for the rung that needs retreat fire.
+    # chosen, waiting for retreat fire to earn its place.
     available_actions = np.array([True] * 9 + [False] * 3)
     available_actions.flags.writeable = False
 
