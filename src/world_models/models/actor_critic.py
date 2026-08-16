@@ -35,12 +35,43 @@ class Actor(nn.Module):
         return self.max_action * jnp.tanh(pre)
 
 
+# A large finite offset rather than -inf: -inf pushed straight into
+# softmax/log_softmax leaves the gradient at that logit as inf - inf,
+# i.e. NaN, and that NaN spreads through the whole batch on the next
+# backward pass even though the disabled action itself never needed a
+# gradient. 1e9 dwarfs anything a trunk this size ever emits as a raw
+# logit, so the masked slots still carry effectively zero probability.
+MASKED_LOGIT_OFFSET = -1e9
+
+
+def _mask_logits(logits, action_mask):
+    """Push disabled actions' logits far down without using -inf.
+
+    action_mask is boolean, broadcastable against logits' last axis,
+    True marking an enabled action. None means every action is enabled
+    and logits comes back untouched, so a caller that never passes a
+    mask sees byte-identical behavior to before masking existed.
+    """
+    if action_mask is None:
+        return logits
+    return logits + jnp.where(action_mask, 0.0, MASKED_LOGIT_OFFSET)
+
+
 class DiscreteActor(nn.Module):
     """Categorical actor over one-hot actions.
 
     Doom's take_cover offers {left, right, noop} and nothing in between,
     which a tanh-Gaussian cannot express. Same trunk as Actor; the head
     emits logits instead of (mu, sigma).
+
+    Every action-distribution method takes an optional action_mask
+    (boolean, action_dim, default None): DoomCampaign's action space
+    reserves a few one-hot slots that are not choosable yet, and the
+    mask keeps the network's output width fixed at action_dim while
+    still excluding those slots from sampling, the greedy action,
+    log-prob, and entropy. With action_mask left at None, nothing about
+    this class's behavior or its param tree changes from before masking
+    existed.
     """
     action_dim: int = 3
 
@@ -50,35 +81,47 @@ class DiscreteActor(nn.Module):
         x = nn.silu(nn.Dense(128)(x))
         return nn.Dense(self.action_dim)(x)
 
-    def act(self, s, key=None):
+    def act(self, s, key=None, action_mask=None):
         """Sampled (training) or greedy (key=None) one-hot action.
 
         Plain action selection for talking to the env — no gradient
         tricks; use sample_st inside imagination.
         """
-        logits = self(s)
+        logits = _mask_logits(self(s), action_mask)
         i = (jnp.argmax(logits, axis=-1) if key is None
              else jax.random.categorical(key, logits))
         return jax.nn.one_hot(i, self.action_dim)
 
-    def sample_st(self, s, key):
+    def sample_st(self, s, key, action_mask=None):
         """Straight-through one-hot sample, for imagination.
 
         Forward pass carries the hard one-hot, so the dynamics see a
         real action; backward pass carries the softmax probabilities,
         so value gradients reach the logits even though the sample
-        itself is discrete and has no derivative of its own.
+        itself is discrete and has no derivative of its own. A masked
+        action never wins the categorical draw and its near-zero
+        softmax share contributes nothing worth mentioning to the
+        backward pass either.
         """
-        logits = self(s)
+        logits = _mask_logits(self(s), action_mask)
         probs = jax.nn.softmax(logits)
         one_hot = jax.nn.one_hot(jax.random.categorical(key, logits),
                                  self.action_dim)
         return one_hot + probs - jax.lax.stop_gradient(probs)
 
-    def entropy(self, s):
+    def log_prob(self, s, action, action_mask=None):
+        """Log probability the (masked) distribution assigns to a
+        one-hot action, for policy-gradient style losses that need the
+        probability of the action actually taken rather than a sample."""
+        log_p = jax.nn.log_softmax(_mask_logits(self(s), action_mask))
+        return (log_p * action).sum(axis=-1)
+
+    def entropy(self, s, action_mask=None):
         """Categorical entropy, via log_softmax so confident logits
-        can't take a log of zero."""
-        log_p = jax.nn.log_softmax(self(s))
+        can't take a log of zero. A masked action's near-zero
+        probability makes its own term vanish, so this is the entropy
+        of the smaller distribution over the remaining actions."""
+        log_p = jax.nn.log_softmax(_mask_logits(self(s), action_mask))
         return -(jnp.exp(log_p) * log_p).sum(axis=-1)
 
 
