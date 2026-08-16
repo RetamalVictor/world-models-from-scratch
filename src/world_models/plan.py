@@ -46,7 +46,7 @@ _DISABLED_LOGIT = -1e9
 
 @dataclass(frozen=True)
 class MPCConfig:
-    """Planner knobs. The defaults are the rung 1 configuration.
+    """Planner knobs. The defaults are the first evaluation configuration.
 
     temperature divides the actor's logits before sampling candidates,
     so it must be positive; small values approach the greedy actor and
@@ -85,7 +85,7 @@ def score_rollout(rewards, continues, discount: float, tail_value=None):
     standing in for everything past the horizon. It is weighted by
     discount**H and the full continue product, the same factor the
     reward one step earlier would have carried. None omits it, which is
-    the no-value-tail arm of the rung 1 ablation.
+    the no-value-tail arm of the planner ablation.
     """
     horizon = rewards.shape[0]
     # survival[i] = probability of reaching s_i, so survival[0] is 1 and
