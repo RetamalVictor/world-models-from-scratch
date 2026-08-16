@@ -22,6 +22,10 @@ checkpoints/
 runs/
 /*.gif
 
+# Already covered by data/ above; named explicitly because this is
+# where fetch_wads.py lands the IWADs it downloads
+data/wads/
+
 # Local only. The remote carries what is needed to run and understand the
 # experiments; write-up artefacts and the browser export stay on disk.
 docs/*

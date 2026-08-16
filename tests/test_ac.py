@@ -155,3 +155,75 @@ def test_discrete_actor_entropy():
     flat = actor.apply(jax.tree.map(jnp.zeros_like, params), s,
                        method=DiscreteActor.entropy)
     np.testing.assert_allclose(np.asarray(flat), np.log(3.0), atol=1e-6)
+
+
+def test_discrete_actor_mask_zero_frequency_and_probability_mass():
+    actor, s, params = _discrete_actor(action_dim=4, batch=1)
+    mask = jnp.array([True, False, True, True])
+    choices = set()
+    for i in range(500):
+        a = actor.apply(params, s, jax.random.PRNGKey(1000 + i), mask,
+                        method=DiscreteActor.act)
+        choices.add(int(np.asarray(a)[0].argmax()))
+    assert 1 not in choices
+    assert choices <= {0, 2, 3}
+
+    disabled_one_hot = jax.nn.one_hot(jnp.array([1]), 4)
+    log_p = actor.apply(params, s, disabled_one_hot, mask,
+                        method=DiscreteActor.log_prob)
+    assert float(jnp.exp(log_p)[0]) < 1e-6
+
+
+def test_discrete_actor_mask_entropy_equals_smaller_distribution():
+    actor, s, params = _discrete_actor(action_dim=5, batch=4)
+    mask = np.array([True, False, True, True, False])
+    logits = np.asarray(actor.apply(params, s))
+    enabled = logits[:, mask]
+    # Same log_softmax spelled out as test_discrete_actor_entropy, but
+    # over only the enabled columns: the entropy of a masked 5-way
+    # distribution should equal the entropy of the plain 3-way one.
+    shifted = enabled - enabled.max(-1, keepdims=True)
+    log_p = shifted - np.log(np.exp(shifted).sum(-1, keepdims=True))
+    expected = -(np.exp(log_p) * log_p).sum(-1)
+    ent = actor.apply(params, s, jnp.array(mask), method=DiscreteActor.entropy)
+    np.testing.assert_allclose(np.asarray(ent), expected, atol=1e-5)
+
+
+def test_discrete_actor_full_mask_gradients_match_no_mask():
+    actor, s, params = _discrete_actor(action_dim=3, batch=4)
+    key = jax.random.PRNGKey(7)
+    full_mask = jnp.array([True, True, True])
+    w = jnp.array([1.0, -2.0, 0.5])
+
+    def score(p, mask):
+        a = actor.apply(p, s, key, mask, method=DiscreteActor.sample_st)
+        return (a * w).sum()
+
+    grads_none = jax.grad(lambda p: score(p, None))(params)
+    grads_full = jax.grad(lambda p: score(p, full_mask))(params)
+    for g_none, g_full in zip(jax.tree_util.tree_leaves(grads_none),
+                              jax.tree_util.tree_leaves(grads_full)):
+        np.testing.assert_array_equal(np.asarray(g_none), np.asarray(g_full))
+
+
+def test_discrete_actor_mask_straight_through_still_flows_gradient():
+    actor, s, params = _discrete_actor(action_dim=4, batch=5)
+    key = jax.random.PRNGKey(11)
+    mask = jnp.array([True, False, True, False])
+
+    st = actor.apply(params, s, key, mask, method=DiscreteActor.sample_st)
+    hard = actor.apply(params, s, key, mask, method=DiscreteActor.act)
+    np.testing.assert_allclose(np.asarray(st), np.asarray(hard), atol=1e-6)
+    chosen = set(np.asarray(hard).argmax(-1).tolist())
+    assert chosen <= {0, 2}
+
+    w = jnp.array([1.0, 0.3, -0.7, 2.0])
+
+    def score(p):
+        a = actor.apply(p, s, key, mask, method=DiscreteActor.sample_st)
+        return (a * w).sum()
+
+    grads = jax.grad(score)(params)
+    biggest = max(float(jnp.abs(g).max())
+                  for g in jax.tree_util.tree_leaves(grads))
+    assert biggest > 0
