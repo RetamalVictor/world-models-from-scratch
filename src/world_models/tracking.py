@@ -44,6 +44,13 @@ def metrics_figure(run_dir: str | Path):
         k for r in rows for k in r
         if k != "step" and not k.startswith("val_")
     ))
+    if not base_keys:
+        # A run shorter than log_every logs no rows; an empty figure
+        # beats crashing after the training already finished.
+        fig, ax = plt.subplots(figsize=(4.5, 3.2))
+        ax.set_axis_off()
+        ax.set_title("no logged metrics", fontsize=10)
+        return fig
     fig, axes = plt.subplots(1, len(base_keys),
                              figsize=(4.5 * len(base_keys), 3.2))
     axes = axes if len(base_keys) > 1 else [axes]
