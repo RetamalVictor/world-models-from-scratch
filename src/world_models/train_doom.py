@@ -58,6 +58,10 @@ from world_models.train_rssm import Config as RSSMConfig
 from world_models.train_rssm import (filter_episodes, filmstrip_figure,
                                      make_losses, rollout_prior)
 
+# Scheduled-reset lane; train_online owns 1..5, so 6 keeps the reset
+# keys disjoint from every counter the other lanes replay.
+K_RESET = 6
+
 
 @dataclass(frozen=True)
 class Config:
@@ -90,6 +94,17 @@ class Config:
     ac_grad_clip: float = 100.0
     seq_batch: int = 8
     seq_len: int = 16
+    # Prior sigma multiplier during imagination only: the 2018 World
+    # Models tau lever (1.15 in the paper), neutral at 1.0.
+    imagination_temperature: float = 1.0
+    # Two follow-ups to the 0011 refit-vs-co-training result, both off
+    # by default. critic_ema > 0 bootstraps imagined lambda-returns
+    # from a slow EMA copy of the critic while the live critic takes
+    # the gradient; ac_reset_every > 0 reinits actor and critic every
+    # that many rounds (never on the final round), the scheduled
+    # version of the final refit.
+    critic_ema: float = 0.0
+    ac_reset_every: int = 0
     # the loop
     buffer_capacity: int = 200_000   # frames (~800 MB of uint8)
     seed_episodes: int = 20          # random policy, before round 1
@@ -143,7 +158,9 @@ def make_imagination(wm: RSSM, actor: DiscreteActor, critic: Critic,
                               method=DiscreteActor.entropy).mean()
             h = wm.apply(wm_params, h, z, a, method=RSSM.core_step)
             mu_p, sig_p = wm.apply(wm_params, h, method=RSSM.prior_dist)
-            z = mu_p + sig_p * pn
+            # tau touches only these dream samples; posterior filtering
+            # and the filmstrip's rollout_prior stay at temperature 1
+            z = mu_p + sig_p * config.imagination_temperature * pn
             r = wm.apply(wm_params, h, z, method=RSSM.reward)
             c = jax.nn.sigmoid(
                 wm.apply(wm_params, h, z, method=RSSM.continue_logit))
@@ -154,18 +171,24 @@ def make_imagination(wm: RSSM, actor: DiscreteActor, critic: Critic,
         states = jnp.concatenate([s0[None], states], axis=0)
         return states, rewards, continues, ents.mean()
 
-    def actor_loss_fn(actor_params, wm_params, critic_params, h0, z0, key):
+    def actor_loss_fn(actor_params, wm_params, value_params, h0, z0, key):
         states, rewards, continues, entropy = imagine(
             wm_params, actor_params, h0, z0, key)
-        values = critic.apply(critic_params, states)
+        values = critic.apply(value_params, states)
         returns = lambda_returns(rewards, values[1:], config.gamma,
                                  config.lam, continues=continues)
         loss = -returns.mean() - config.ent_coef * entropy
         return loss, (states, rewards, continues, returns)
 
-    def critic_loss_fn(critic_params, states_sg, rewards_sg, continues_sg):
+    def critic_loss_fn(critic_params, value_params, states_sg, rewards_sg,
+                       continues_sg):
         values = critic.apply(critic_params, states_sg)
-        returns = lambda_returns(rewards_sg, values[1:], config.gamma,
+        # With an EMA target the bootstrap comes from the slow params
+        # and only the regression sees the live critic; at 0.0 boot is
+        # values itself, so the traced graph is exactly the old one.
+        boot = (critic.apply(value_params, states_sg)
+                if config.critic_ema > 0.0 else values)
+        returns = lambda_returns(rewards_sg, boot[1:], config.gamma,
                                  config.lam, continues=continues_sg)
         target = jax.lax.stop_gradient(returns)
         return ((values[:-1] - target) ** 2).mean()
@@ -224,7 +247,15 @@ def train(config: Config, env_factory=make_env) -> dict:
         )
         return a_state, c_state
 
+    def fresh_target(c_state):
+        # A real copy, not the same arrays: ac_step donates the target
+        # alongside the live critic, and aliased buffers cannot be
+        # donated twice.
+        return (jax.tree.map(jnp.copy, c_state.params)
+                if config.critic_ema > 0.0 else None)
+
     actor_state, critic_state = fresh_ac(k_ac)
+    target_critic_params = fresh_target(critic_state)
 
     counters = {"round": 0, "episode": 0, "wm_update": 0, "ac_update": 0}
     ckpt = Checkpointer(run_dir, keep=config.keep_checkpoints)
@@ -232,9 +263,22 @@ def train(config: Config, env_factory=make_env) -> dict:
     if config.resume:
         template = {"wm": wm_state, "actor": actor_state,
                     "critic": critic_state, "counters": counters}
-        _, restored = ckpt.restore(template)
+        if target_critic_params is not None:
+            template["critic_target"] = target_critic_params
+        try:
+            _, restored = ckpt.restore(template)
+        except ValueError:
+            # A feature-off checkpoint carries no critic_target (a
+            # plain pretrain resumed into a critic_ema run); restore
+            # without it and seed the target from the restored critic.
+            template.pop("critic_target", None)
+            _, restored = ckpt.restore(template)
         wm_state, actor_state = restored["wm"], restored["actor"]
         critic_state, counters = restored["critic"], dict(restored["counters"])
+        if target_critic_params is not None:
+            target_critic_params = (restored["critic_target"]
+                                    if "critic_target" in restored
+                                    else fresh_target(critic_state))
         buffer = ReplayBuffer.load(run_dir / "buffer.npz")
         print(f"resumed from round {counters['round']} "
               f"({buffer.frames_added} env frames collected so far)")
@@ -274,22 +318,33 @@ def train(config: Config, env_factory=make_env) -> dict:
             jnp.float32(config.beta))
         return state.apply_gradients(grads=grads), loss, recon, kl, rew, con
 
-    @partial(jax.jit, donate_argnums=(1, 2))
-    def ac_step(wm_params, actor_state, critic_state, obs_seq, act_seq, key):
+    # target is None when critic_ema is off, and None is an empty
+    # pytree: the traced graph and the donation set are then exactly
+    # the pre-target ones, which is what keeps the default byte-path
+    # identical.
+    @partial(jax.jit, donate_argnums=(1, 2, 3))
+    def ac_step(wm_params, actor_state, critic_state, target, obs_seq,
+                act_seq, key):
         h_seq, z_seq = filter_episodes(model, wm_params, obs_seq, act_seq)
         h0 = h_seq.reshape(-1, h_seq.shape[-1])
         z0 = z_seq.reshape(-1, z_seq.shape[-1])
+        value_params = critic_state.params if target is None else target
         grad_fn = jax.value_and_grad(actor_loss_fn, has_aux=True)
         (a_loss, (states, rewards, continues, returns)), a_grads = grad_fn(
-            actor_state.params, wm_params, critic_state.params, h0, z0, key)
+            actor_state.params, wm_params, value_params, h0, z0, key)
         actor_state = actor_state.apply_gradients(grads=a_grads)
         c_loss, c_grads = jax.value_and_grad(critic_loss_fn)(
-            critic_state.params, jax.lax.stop_gradient(states),
+            critic_state.params, value_params,
+            jax.lax.stop_gradient(states),
             jax.lax.stop_gradient(rewards),
             jax.lax.stop_gradient(continues))
         critic_state = critic_state.apply_gradients(grads=c_grads)
-        return (actor_state, critic_state, a_loss, c_loss, rewards.mean(),
-                returns.mean())
+        if target is not None:
+            e = config.critic_ema
+            target = jax.tree.map(lambda t, l: e * t + (1.0 - e) * l,
+                                  target, critic_state.params)
+        return (actor_state, critic_state, target, a_loss, c_loss,
+                rewards.mean(), returns.mean())
 
     # Collection policies. The RSSMPolicy's step jit lives for the whole
     # process; params are re-pointed per episode, never re-traced.
@@ -337,6 +392,10 @@ def train(config: Config, env_factory=make_env) -> dict:
     def save_checkpoint(metric):
         tree = {"wm": wm_state, "actor": actor_state, "critic": critic_state,
                 "counters": dict(counters)}
+        # Only the enabled case extends the tree, so disabled runs keep
+        # today's checkpoint bytes exactly.
+        if target_critic_params is not None:
+            tree["critic_target"] = target_critic_params
         ckpt.save(counters["round"], tree, metric=metric)
         buffer.save(run_dir / "buffer.npz")
 
@@ -344,6 +403,17 @@ def train(config: Config, env_factory=make_env) -> dict:
         collect("random")
 
     for r in range(counters["round"] + 1, config.rounds + 1):
+        ac_reset = (config.ac_reset_every > 0 and not config.wm_only
+                    and r % config.ac_reset_every == 0
+                    and r != config.rounds)
+        if ac_reset:
+            # Keyed by the round in its own lane, so the reset is a
+            # pure function of (seed, r) and a resumed run reproduces
+            # it exactly. The final round is exempt: the loop should
+            # not end on an untrained policy.
+            actor_state, critic_state = fresh_ac(
+                lane_key(root_key, K_RESET, r))
+            target_critic_params = fresh_target(critic_state)
         t0 = time.monotonic()
         collected = [collect("random" if config.wm_only else "explore")
                      for _ in range(config.episodes_per_round)]
@@ -366,10 +436,11 @@ def train(config: Config, env_factory=make_env) -> dict:
                 batch_rng = np.random.default_rng([config.seed, K_AC, u])
                 obs_seq, act_seq, _ = buffer.sample_sequences(
                     batch_rng, config.seq_batch, config.seq_len)
-                (actor_state, critic_state, a_loss, c_loss, imag_reward,
-                 imag_return) = ac_step(
-                    wm_state.params, actor_state, critic_state, obs_seq,
-                    act_seq, lane_key(root_key, K_AC, u))
+                (actor_state, critic_state, target_critic_params, a_loss,
+                 c_loss, imag_reward, imag_return) = ac_step(
+                    wm_state.params, actor_state, critic_state,
+                    target_critic_params, obs_seq, act_seq,
+                    lane_key(root_key, K_AC, u))
                 counters["ac_update"] += 1
 
         counters["round"] = r
@@ -384,6 +455,8 @@ def train(config: Config, env_factory=make_env) -> dict:
             if not config.wm_only:
                 metrics.update(actor_loss=a_loss, critic_loss=c_loss,
                                imag_reward=imag_reward)
+                if ac_reset:
+                    metrics["ac_reset"] = 1
             tracker.log(r, **metrics)
         evaluated = None
         if (not config.wm_only
@@ -414,14 +487,16 @@ def train(config: Config, env_factory=make_env) -> dict:
     if config.final_ac_steps > 0:
         refit_actor_state, refit_critic_state = fresh_ac(
             lane_key(root_key, K_REFIT, 0))
+        refit_target = fresh_target(refit_critic_state)
         for u in range(1, config.final_ac_steps + 1):
             batch_rng = np.random.default_rng([config.seed, K_REFIT, u])
             obs_seq, act_seq, _ = buffer.sample_sequences(
                 batch_rng, config.seq_batch, config.seq_len)
-            (refit_actor_state, refit_critic_state, a_loss, c_loss,
-             imag_reward, _) = ac_step(
+            (refit_actor_state, refit_critic_state, refit_target, a_loss,
+             c_loss, imag_reward, _) = ac_step(
                 wm_state.params, refit_actor_state, refit_critic_state,
-                obs_seq, act_seq, lane_key(root_key, K_REFIT, u))
+                refit_target, obs_seq, act_seq,
+                lane_key(root_key, K_REFIT, u))
             if u % 500 == 0 or u == config.final_ac_steps:
                 tracker.log(config.rounds + u, refit_actor_loss=a_loss,
                             refit_imag_reward=imag_reward)
@@ -483,6 +558,12 @@ def main():
     parser.add_argument("--rounds", type=int, default=defaults.rounds)
     parser.add_argument("--wm-updates", type=int, default=defaults.wm_updates)
     parser.add_argument("--ac-updates", type=int, default=defaults.ac_updates)
+    parser.add_argument("--imagination-temperature", type=float,
+                        default=defaults.imagination_temperature)
+    parser.add_argument("--critic-ema", type=float,
+                        default=defaults.critic_ema)
+    parser.add_argument("--ac-reset-every", type=int,
+                        default=defaults.ac_reset_every)
     parser.add_argument("--episodes-per-round", type=int,
                         default=defaults.episodes_per_round)
     parser.add_argument("--seed-episodes", type=int,
@@ -503,6 +584,9 @@ def main():
         rounds=args.rounds,
         wm_updates=args.wm_updates,
         ac_updates=args.ac_updates,
+        imagination_temperature=args.imagination_temperature,
+        critic_ema=args.critic_ema,
+        ac_reset_every=args.ac_reset_every,
         episodes_per_round=args.episodes_per_round,
         seed_episodes=args.seed_episodes,
         buffer_capacity=args.buffer_capacity,

@@ -2,6 +2,7 @@ import dataclasses
 import json
 
 import numpy as np
+from flax import serialization
 
 from world_models.train_doom import Config, train
 
@@ -95,6 +96,68 @@ def test_full_loop_evals_actor_and_refit(tmp_path):
     assert set(eval_json) >= {"actor", "actor_refit", "random"}
 
 
+def test_imagination_temperature_neutral_at_one(tmp_path):
+    # tau only scales the prior sample inside ac_step's imagination, so
+    # at 1.0 the whole run must stay byte-identical to the default
+    # (IEEE multiply by 1.0 is exact) and at 2.0 the actor and critic
+    # in the checkpoint must move.
+    for name, tau in (("t-default", None), ("t-one", 1.0), ("t-two", 2.0)):
+        overrides = {} if tau is None else {"imagination_temperature": tau}
+        train(_tiny_config(tmp_path, name, rounds=1, **overrides),
+              env_factory=lambda c: FakeDoom())
+
+    def ckpt(name):
+        return (tmp_path / name / "checkpoints" /
+                "step_00000001.msgpack").read_bytes()
+
+    assert ckpt("t-default") == ckpt("t-one")
+    assert ckpt("t-default") != ckpt("t-two")
+
+
+def test_target_and_reset_defaults_are_neutral(tmp_path):
+    # critic_ema=0.0 keeps target handling out of the traced ac_step
+    # and out of the checkpoint tree, and ac_reset_every=0 never fires,
+    # so explicit zeros must reproduce the default run byte for byte.
+    train(_tiny_config(tmp_path, "z-default", rounds=1),
+          env_factory=lambda c: FakeDoom())
+    train(_tiny_config(tmp_path, "z-zeros", rounds=1, critic_ema=0.0,
+                       ac_reset_every=0),
+          env_factory=lambda c: FakeDoom())
+
+    def ckpt(name):
+        return (tmp_path / name / "checkpoints" /
+                "step_00000001.msgpack").read_bytes()
+
+    assert ckpt("z-default") == ckpt("z-zeros")
+
+
+def test_each_feature_changes_training(tmp_path):
+    # Two rounds because the EMA target equals the live critic until
+    # the first ac step has moved the live params; only the second
+    # step bootstraps from a target that lags.
+    for name, overrides in (("f-default", {}),
+                            ("f-ema", {"critic_ema": 0.9}),
+                            ("f-reset", {"ac_reset_every": 1})):
+        train(_tiny_config(tmp_path, name, rounds=2, **overrides),
+              env_factory=lambda c: FakeDoom())
+
+    def ckpt(name):
+        return (tmp_path / name / "checkpoints" /
+                "step_00000002.msgpack").read_bytes()
+
+    # The ema tree differs trivially by carrying the target, so compare
+    # the shared actor subtree: it only moves differently if the
+    # lagging bootstrap actually changed the imagined returns.
+    default = serialization.msgpack_restore(ckpt("f-default"))
+    ema = serialization.msgpack_restore(ckpt("f-ema"))
+    assert "critic_target" in ema and "critic_target" not in default
+    assert (serialization.msgpack_serialize(ema["actor"])
+            != serialization.msgpack_serialize(default["actor"]))
+    # A reset fires at round 1 (round 2 is final, exempt) and reinits
+    # from the K_RESET lane, so the whole trajectory moves.
+    assert ckpt("f-reset") != ckpt("f-default")
+
+
 def test_resume_matches_uninterrupted(tmp_path):
     # A constant death schedule: FakeDoom counts episodes per instance,
     # and a resumed run starts a fresh instance mid-run, so any
@@ -112,3 +175,46 @@ def test_resume_matches_uninterrupted(tmp_path):
     ckpt_b = (tmp_path / "b" / "checkpoints" /
               "step_00000004.msgpack").read_bytes()
     assert ckpt_a == ckpt_b
+
+
+def test_resume_with_target_and_resets(tmp_path):
+    # test_resume_matches_uninterrupted with both features on. The
+    # schedule puts one reset before the interrupt (r=2) and one after
+    # the resume (r=4, keyed only by seed and round number), with r=6
+    # exempt as the final round; critic_ema puts the target params in
+    # the checkpoint tree. Byte-identity at round 6 proves both
+    # survive the round trip.
+    kw = dict(critic_ema=0.9, ac_reset_every=2)
+    train(_tiny_config(tmp_path, "ta", rounds=6, **kw),
+          env_factory=lambda c: FakeDoom(die_ats=(7,)))
+    train(_tiny_config(tmp_path, "tb", rounds=3, **kw),
+          env_factory=lambda c: FakeDoom(die_ats=(7,)))
+    train(_tiny_config(tmp_path, "tb", rounds=6, resume=True, **kw),
+          env_factory=lambda c: FakeDoom(die_ats=(7,)))
+
+    ckpt_a = (tmp_path / "ta" / "checkpoints" /
+              "step_00000006.msgpack").read_bytes()
+    ckpt_b = (tmp_path / "tb" / "checkpoints" /
+              "step_00000006.msgpack").read_bytes()
+    assert ckpt_a == ckpt_b
+
+
+def test_resume_feature_off_checkpoint_into_ema_config(tmp_path):
+    # A default-config pretrain saves no critic_target, but resuming it
+    # into a critic_ema run puts that key in the restore template,
+    # which used to crash flax restore on the mismatch. train() now
+    # drops the key and seeds the target from the restored critic, so
+    # the resumed full loop must run through: r=3 does ac updates on
+    # the seeded target, r=4 exercises a reset under the ema config,
+    # and the final checkpoint carries the target and the new rounds.
+    train(_tiny_config(tmp_path, "off-ema", rounds=2, wm_only=True),
+          env_factory=lambda c: FakeDoom())
+    train(_tiny_config(tmp_path, "off-ema", rounds=5, resume=True,
+                       critic_ema=0.9, ac_reset_every=4),
+          env_factory=lambda c: FakeDoom())
+
+    tree = serialization.msgpack_restore(
+        (tmp_path / "off-ema" / "checkpoints" /
+         "step_00000005.msgpack").read_bytes())
+    assert tree["counters"]["round"] == 5
+    assert "critic_target" in tree
