@@ -24,7 +24,7 @@ runs/
 
 # Local only. The remote carries what is needed to run and understand the
 # experiments; write-up artefacts and the browser export stay on disk.
-docs/
+docs/*
 web/
 scripts/tutorial_diagrams.py
 scripts/export_dream_web.py
@@ -32,3 +32,4 @@ scripts/export_dream_web.py
 # Markdown is reviewed and committed manually; only the README is tracked
 *.md
 !README.md
+!docs/reproduce-doom.md
