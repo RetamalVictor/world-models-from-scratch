@@ -60,7 +60,7 @@ class WadSpec:
 
 
 # Verified by downloading each mirror and hashing the bytes by hand
-# during research for this script (see the accompanying report); if a
+# during research for this script; if a
 # mirror ever moves, re-pin by fetching the new file and running this
 # script with --print-hash on it, after checking the new bytes are the
 # wad they claim to be some other way (a second independent mirror, a
