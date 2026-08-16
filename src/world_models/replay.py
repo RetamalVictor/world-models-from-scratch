@@ -12,6 +12,13 @@ with exactly the data the interrupted run had.
 Episodes carry a terminated flag: True means the agent died, False means
 the collector simply stopped (a time limit). Only the first kind ends
 the world, and only the first kind produces a zero continue target.
+
+Campaign episodes carry two more things, both optional and both
+inert as far as training is concerned: the game variables recorded
+beside every frame, and the flavor the episode ended with. They ride
+along with their episode through saving, loading and eviction, and no
+sampler ever puts them in a batch. They exist for dataset reports and
+for probes, which need ground truth behind the pixels.
 """
 
 from __future__ import annotations
@@ -52,21 +59,52 @@ class ReplayBuffer:
         return len(self._episodes)
 
     def add_episode(self, obs: np.ndarray, action: np.ndarray,
-                    reward: np.ndarray, terminated: bool = False):
+                    reward: np.ndarray, terminated: bool = False,
+                    variables: np.ndarray | None = None,
+                    reason: str | None = None):
         """obs uint8 (T+1, H, W, C); action (T+1, A); reward (T+1,).
 
         terminated: the episode ended in death rather than a time limit.
+
+        variables (T+1, n_vars) float32 and reason are the campaign
+        collector's extras and default to absent, so every existing
+        caller stores exactly what it stored before. A buffer either
+        carries variables for every episode or for none, because save()
+        concatenates them into one array; mixing is a caller bug and is
+        rejected here rather than at the next checkpoint, an hour into
+        a run.
         """
         obs = np.asarray(obs)
         if obs.dtype != np.uint8:
             raise ValueError(
                 f"store uint8 frames, got {obs.dtype}; convert at batch time"
             )
+        if variables is not None:
+            variables = np.asarray(variables, np.float32)
+            if variables.shape[0] != obs.shape[0]:
+                raise ValueError(
+                    f"variables has {variables.shape[0]} rows for "
+                    f"{obs.shape[0]} frames; one row per frame"
+                )
+        if self._episodes:
+            stored = self._episodes[0]["variables"]
+            if (stored is None) != (variables is None):
+                raise ValueError(
+                    "either every episode in a buffer carries variables "
+                    "or none does"
+                )
+            if stored is not None and stored.shape[1] != variables.shape[1]:
+                raise ValueError(
+                    f"variables has {variables.shape[1]} columns, the "
+                    f"buffer stores {stored.shape[1]}"
+                )
         self._episodes.append({
             "obs": obs,
             "action": np.asarray(action, np.float32),
             "reward": np.asarray(reward, np.float32),
             "terminated": bool(terminated),
+            "variables": variables,
+            "reason": None if reason is None else str(reason),
         })
         self.frames += obs.shape[0]
         self.frames_added += obs.shape[0]
@@ -142,8 +180,7 @@ class ReplayBuffer:
         path = Path(path)
         episodes = list(self._episodes)
         tmp = path.with_name(path.stem + ".incoming.npz")
-        np.savez(
-            tmp,
+        fields = dict(
             obs=np.concatenate([ep["obs"] for ep in episodes]),
             action=np.concatenate([ep["action"] for ep in episodes]),
             reward=np.concatenate([ep["reward"] for ep in episodes]),
@@ -152,6 +189,16 @@ class ReplayBuffer:
             capacity=self.capacity,
             frames_added=self.frames_added,
         )
+        # The campaign fields are written only when they exist, so a
+        # buffer that never had them saves the file it always did.
+        if episodes and episodes[0]["variables"] is not None:
+            fields["variables"] = np.concatenate(
+                [ep["variables"] for ep in episodes])
+        if any(ep["reason"] is not None for ep in episodes):
+            # The empty string is "not recorded": npz has no None.
+            fields["reason"] = np.array(
+                [ep["reason"] or "" for ep in episodes])
+        np.savez(tmp, **fields)
         tmp.replace(path)
 
     @classmethod
@@ -164,12 +211,22 @@ class ReplayBuffer:
             # which only ever times out.
             terminated = (f["terminated"] if "terminated" in f
                           else np.zeros(len(lengths), bool))
-            for start, length, term in zip(
+            # Both campaign fields are absent from every dataset written
+            # before the campaign env existed, and from every take_cover
+            # one written after it.
+            variables = f["variables"] if "variables" in f else None
+            reasons = f["reason"] if "reason" in f else None
+            for i, (start, length, term) in enumerate(zip(
                 np.concatenate([[0], np.cumsum(lengths)[:-1]]), lengths,
                 terminated,
-            ):
-                buffer.add_episode(obs[start:start + length],
-                                   act[start:start + length],
-                                   rew[start:start + length], bool(term))
+            )):
+                reason = None if reasons is None else str(reasons[i]) or None
+                buffer.add_episode(
+                    obs[start:start + length],
+                    act[start:start + length],
+                    rew[start:start + length], bool(term),
+                    variables=(None if variables is None
+                               else variables[start:start + length]),
+                    reason=reason)
             buffer.frames_added = int(f["frames_added"])
         return buffer
