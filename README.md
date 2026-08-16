@@ -51,7 +51,9 @@ The fastest possible result, a few seconds on any laptop:
 uv run ball-demo --gif ball.gif
 ```
 
-![a random rollout in the ball env](assets/ball-demo.gif)
+<p align="center">
+  <img src="assets/ball-demo.gif" alt="a random rollout in the ball env">
+</p>
 
 That is the environment: a ball bouncing in a box, rendered to 32x32
 grayscale. The simulator reports the true `(x, y, vx, vy)` behind every
@@ -79,8 +81,10 @@ This is what the end of that pipeline looks like. The online world
 model dreaming the follow task, and the actor it trained, chasing the
 real target:
 
-![the world model dreaming](assets/ball-imagination.gif)
-![the trained actor on the real env](assets/ball-follow-rollout.gif)
+<p align="center">
+  <img src="assets/ball-imagination.gif" alt="the world model dreaming">
+  <img src="assets/ball-follow-rollout.gif" alt="the trained actor on the real env">
+</p>
 
 On my RTX 5070 Ti: the VAE takes about 2 minutes, the GRU 3, the RSSM
 20, the actor-critic 5. CPU runs work and match to a few decimals
@@ -150,7 +154,9 @@ What the pretrain buys, the real episode on the left, the model's
 dream of it on the right, sampled from the prior after four warm-up
 frames:
 
-![real take_cover frames vs the model's dream](assets/doom-dream.gif)
+<p align="center">
+  <img src="assets/doom-dream.gif" alt="real take_cover frames vs the model's dream">
+</p>
 
 The first command pretrains the world model on random play, about an
 hour on an RTX 4090. The second resumes into the online loop with the
@@ -178,12 +184,16 @@ A median episode from the composed agent, the model's-eye 64x64 view
 (median, not best: survival variance here is enormous, and the median
 is what you should expect to see):
 
-![the trained agent dodging, median episode](assets/doom-agent-median.gif)
+<p align="center">
+  <img src="assets/doom-agent-median.gif" alt="the trained agent dodging, median episode">
+</p>
 
 And the best of the same ten episodes, 367 steps, 1468 engine tics,
 five times the random mean. When the reads go right, they compound:
 
-![the trained agent's best episode, 367 steps](assets/doom-agent-best.gif)
+<p align="center">
+  <img src="assets/doom-agent-best.gif" alt="the trained agent's best episode, 367 steps">
+</p>
 
 Each row is one flag set away from the plain loop, and the knobs are
 all neutral by default: `--imagination-temperature` multiplies the
