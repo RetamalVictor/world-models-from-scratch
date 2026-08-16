@@ -11,6 +11,10 @@ def _episode(value: int, length: int):
     return obs, action, reward
 
 
+def _variables(value: int, length: int, n_vars: int = 3):
+    return np.full((length, n_vars), float(value), np.float32)
+
+
 def test_rejects_float_frames():
     buffer = ReplayBuffer(capacity=100)
     obs, action, reward = _episode(1, 10)
@@ -128,6 +132,83 @@ def test_terminated_survives_save_load(tmp_path):
     b = loaded.sample_sequences_with_continues(np.random.default_rng(1), 32, 5)
     for x, y in zip(a, b):
         np.testing.assert_array_equal(np.asarray(x), np.asarray(y))
+
+
+def test_campaign_fields_survive_save_load(tmp_path):
+    buffer = ReplayBuffer(capacity=100)
+    for value, reason in ((1, "exit"), (2, "death"), (3, "timeout")):
+        buffer.add_episode(*_episode(value, 6), terminated=reason != "timeout",
+                           variables=_variables(value, 6), reason=reason)
+    path = tmp_path / "campaign.npz"
+    buffer.save(path)
+    loaded = ReplayBuffer.load(path)
+
+    assert loaded.n_episodes == 3 and len(loaded) == len(buffer)
+    for before, after in zip(buffer._episodes, loaded._episodes):
+        np.testing.assert_array_equal(before["variables"], after["variables"])
+        assert before["reason"] == after["reason"]
+
+
+def test_campaign_fields_are_evicted_with_their_episode():
+    buffer = ReplayBuffer(capacity=25)
+    for value in (1, 2, 3):
+        buffer.add_episode(*_episode(value, 10),
+                           variables=_variables(value, 10), reason="exit")
+    assert buffer.n_episodes == 2
+    kept = [ep["variables"][0, 0] for ep in buffer._episodes]
+    assert kept == [2.0, 3.0]
+
+
+def test_sampling_ignores_the_campaign_fields():
+    """Sequence sampling is untouched: the same seed draws the same
+    batch whether or not variables ride along."""
+    plain, extra = ReplayBuffer(capacity=200), ReplayBuffer(capacity=200)
+    for value in (1, 2, 3):
+        plain.add_episode(*_episode(value, 10), terminated=value == 2)
+        extra.add_episode(*_episode(value, 10), terminated=value == 2,
+                          variables=_variables(value, 10), reason="exit")
+    a = plain.sample_sequences_with_continues(np.random.default_rng(3), 16, 4)
+    b = extra.sample_sequences_with_continues(np.random.default_rng(3), 16, 4)
+    for x, y in zip(a, b):
+        np.testing.assert_array_equal(np.asarray(x), np.asarray(y))
+
+
+def test_buffers_without_variables_save_the_file_they_always_did(tmp_path):
+    """The byte-identical guard: no campaign episodes, no new arrays in
+    the npz, so a take_cover dataset written today is one an older
+    checkout could read."""
+    buffer = ReplayBuffer(capacity=100)
+    buffer.add_episode(*_episode(1, 6), terminated=True)
+    path = tmp_path / "legacy.npz"
+    buffer.save(path)
+    with np.load(path) as f:
+        assert sorted(f.files) == ["action", "capacity", "frames_added",
+                                   "lengths", "obs", "reward", "terminated"]
+
+
+def test_mixing_episodes_with_and_without_variables_is_rejected():
+    buffer = ReplayBuffer(capacity=100)
+    buffer.add_episode(*_episode(1, 6), variables=_variables(1, 6))
+    with pytest.raises(ValueError):
+        buffer.add_episode(*_episode(2, 6))
+
+    other = ReplayBuffer(capacity=100)
+    other.add_episode(*_episode(1, 6))
+    with pytest.raises(ValueError):
+        other.add_episode(*_episode(2, 6), variables=_variables(2, 6))
+
+
+def test_variables_must_have_one_row_per_frame():
+    buffer = ReplayBuffer(capacity=100)
+    with pytest.raises(ValueError):
+        buffer.add_episode(*_episode(1, 6), variables=_variables(1, 5))
+
+
+def test_variables_must_keep_the_same_width_across_a_buffer():
+    buffer = ReplayBuffer(capacity=100)
+    buffer.add_episode(*_episode(1, 6), variables=_variables(1, 6, n_vars=3))
+    with pytest.raises(ValueError):
+        buffer.add_episode(*_episode(2, 6), variables=_variables(2, 6, n_vars=4))
 
 
 def test_loads_buffers_written_before_the_terminated_flag(tmp_path):
